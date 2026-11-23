@@ -166,6 +166,11 @@ func TestDefaultBranch(t *testing.T) {
 			setup:   func(t *testing.T, repo string) { runGit(t, repo, "pack-refs", "--all") },
 			want:    "master",
 		},
+		"master beside a main/ directory": {
+			initial: "master",
+			setup:   func(t *testing.T, repo string) { runGit(t, repo, "branch", "main/feature") },
+			want:    "master",
+		},
 		"neither falls back to main": {
 			initial: "trunk",
 			want:    "main",

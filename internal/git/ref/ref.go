@@ -33,11 +33,13 @@ func Heads(branch string) string {
 
 // Exists reports whether ref name exists in commonDir, loose or packed.
 func Exists(commonDir, name string) (bool, error) {
-	_, err := os.Stat(filepath.Join(commonDir, filepath.FromSlash(name)))
-	if err == nil {
+	// A directory is not a ref: refs/heads/main is one when only main/feature
+	// exists.
+	info, err := os.Stat(filepath.Join(commonDir, filepath.FromSlash(name)))
+	if err == nil && !info.IsDir() {
 		return true, nil
 	}
-	if !errors.Is(err, fs.ErrNotExist) {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return false, fmt.Errorf("ref: %w", err)
 	}
 

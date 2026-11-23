@@ -70,6 +70,11 @@ func TestExists(t *testing.T) {
 		"missing":          {packed: packed, name: "refs/heads/main", want: false},
 		"no refs at all":   {name: "refs/heads/main", want: false},
 		"prefix not match": {packed: packed, name: "refs/heads/mast", want: false},
+		"directory is not a ref": {
+			loose: "refs/heads/main/feature",
+			name:  "refs/heads/main",
+			want:  false,
+		},
 	}
 
 	for name, tt := range tests {
