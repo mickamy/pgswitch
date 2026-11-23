@@ -433,6 +433,23 @@ func TestRouteParentProvenance(t *testing.T) {
 		setup       func(t *testing.T, repo string, r router.Router) (branch string)
 		wantSources []string
 	}{
+		"an explicit main beats a sibling at the same commit": {
+			setup: func(t *testing.T, repo string, _ router.Router) string {
+				runGit(t, repo, "switch", "-q", "-c", "child", "main")
+
+				return "child"
+			},
+			wantSources: []string{database, db("sibling")},
+		},
+		"an explicit main beats the branch switched from": {
+			setup: func(t *testing.T, repo string, r router.Router) string {
+				runGit(t, repo, "switch", "-q", "-c", "child", "main")
+				r.Switched(filepath.Join(repo, ".git"), "feature/a", "child")
+
+				return "child"
+			},
+			wantSources: []string{database, db("feature/a"), db("sibling")},
+		},
 		"a later checkout does not replace the creation switch": {
 			setup: func(t *testing.T, repo string, r router.Router) string {
 				commonDir := filepath.Join(repo, ".git")

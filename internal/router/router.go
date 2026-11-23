@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"slices"
 	"time"
 
 	"github.com/mickamy/pgswitch/internal/clone"
@@ -159,7 +160,9 @@ func (r Router) resolve(ctx context.Context, client, server net.Addr, database s
 		for _, p := range parents {
 			sources = append(sources, route.PhysicalName(database, p, defaultBranch))
 		}
-		sources = append(sources, database)
+		if !slices.Contains(sources, database) {
+			sources = append(sources, database)
+		}
 		logger = logger.With("parents", parents)
 	}
 	logger.Debug("attributed", "worktree", wt.Root, "branch", branch, "physical", physical)

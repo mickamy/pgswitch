@@ -52,7 +52,8 @@ func (s *switches) previous(commonDir, branch string) (string, bool) {
 // parentBranches lists the branches branch was likely created from, best
 // first: the one its reflog names, the one the worktree was on when it
 // switched to branch, then those whose tip is the commit branch started at.
-// The default branch, always the last resort, is left out.
+// The default branch is listed only when the reflog names it; otherwise it is
+// the caller's last resort.
 func (r Router) parentBranches(wt git.Worktree, branch, defaultBranch string) []string {
 	tips, err := ref.BranchTips(wt.CommonDir)
 	if err != nil {
@@ -65,7 +66,7 @@ func (r Router) parentBranches(wt git.Worktree, branch, defaultBranch string) []
 
 	var parents []string
 	add := func(b string) {
-		if b != "" && b != branch && b != defaultBranch && !slices.Contains(parents, b) {
+		if b != "" && b != branch && !slices.Contains(parents, b) {
 			parents = append(parents, b)
 		}
 	}
