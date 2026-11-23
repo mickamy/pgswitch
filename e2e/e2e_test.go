@@ -149,7 +149,7 @@ func startProxy(t *testing.T, admin pgadmin.Config) string {
 		p proxy.Proxy
 	)
 	w := watch.New(logger, func(c watch.Change) {
-		r.Switched(c.CommonDir, c.From, c.To)
+		r.Switched(t.Context(), c.CommonDir, c.From, c.To)
 		p.Sever(c.Worktree)
 	})
 	r = router.New(logger, clone.New(pgclone.New(admin), logger), w)
@@ -306,4 +306,44 @@ func TestProxyClonesFromTheParentBranch(t *testing.T) { //nolint:paralleltest //
 	onChild := connect(t, viaProxy)
 	assert.Equal(t, childDB, queryValue(t, onChild, "select current_database()"))
 	assert.Equal(t, "FROM_PARENT", queryValue(t, onChild, "select code from coupons"))
+}
+
+// TestProxyFollowsBranchRename renames the checked-out branch: its database is
+// renamed along, keeping its data, rather than cloned afresh.
+func TestProxyFollowsBranchRename(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
+	cfg := adminConfig(t)
+	admin := connect(t, cfg)
+
+	repo, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	runGit(t, repo, "init", "-q", "-b", "main")
+	runGit(t, repo, "commit", "-q", "--allow-empty", "-m", "init")
+	runGit(t, repo, "switch", "-q", "-c", "feature/old")
+
+	db := uniqueName("pgswitch_e2e")
+	oldDB := route.PhysicalName(db, "feature/old", "main")
+	newDB := route.PhysicalName(db, "feature/new", "main")
+	createDatabase(t, admin, db)
+	dropOnCleanup(t, admin, oldDB)
+	dropOnCleanup(t, admin, newDB)
+
+	addr := startProxy(t, cfg)
+	t.Chdir(repo)
+
+	viaProxy := cfg
+	viaProxy.Addr = addr
+	viaProxy.Database = db
+	before := connect(t, viaProxy)
+	require.Equal(t, oldDB, queryValue(t, before, "select current_database()"))
+	require.NoError(t, before.Exec(t.Context(), "create table coupons (code text)"))
+	require.NoError(t, before.Exec(t.Context(), "insert into coupons values ('WRITTEN_BEFORE')"))
+
+	runGit(t, repo, "branch", "-m", "feature/new")
+	require.Eventually(t, func() bool { return before.Exec(t.Context(), "select 1") != nil },
+		5*time.Second, 50*time.Millisecond, "the rename is observed")
+
+	after := connect(t, viaProxy)
+	assert.Equal(t, newDB, queryValue(t, after, "select current_database()"))
+	assert.Equal(t, "WRITTEN_BEFORE", queryValue(t, after, "select code from coupons"))
+	assert.Equal(t, "0", queryValue(t, admin, "select count(*) from pg_database where datname = '"+oldDB+"'"))
 }

@@ -34,6 +34,7 @@ type lookupFunc = func(ctx context.Context, client, server netip.AddrPort) (peer
 type fakeCloner struct {
 	mu      sync.Mutex
 	ensured []string
+	renamed []string
 	waited  []string
 	err     error
 }
@@ -47,6 +48,15 @@ func (c *fakeCloner) Ensure(_ context.Context, target string, sources ...string)
 	c.ensured = append(c.ensured, strings.Join(sources, ",")+"->"+target)
 
 	return c.err
+}
+
+func (c *fakeCloner) Rename(_ context.Context, from, to string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.renamed = append(c.renamed, from+"->"+to)
+
+	return nil
 }
 
 func (c *fakeCloner) Wait(_ context.Context, db string) error {
@@ -357,7 +367,7 @@ func TestRouteClonesFromTheParentBranch(t *testing.T) {
 		"the branch an observed switch came from": {
 			setup: func(t *testing.T, repo string, r router.Router) (string, string) {
 				runGit(t, repo, "switch", "-q", "-c", "observed")
-				r.Switched(filepath.Join(repo, ".git"), "feature/a", "observed")
+				r.Switched(t.Context(), filepath.Join(repo, ".git"), "feature/a", "observed")
 
 				return repo, "observed"
 			},
@@ -376,7 +386,7 @@ func TestRouteClonesFromTheParentBranch(t *testing.T) {
 		"the reflog before the observed switch": {
 			setup: func(t *testing.T, repo string, r router.Router) (string, string) {
 				runGit(t, repo, "switch", "-q", "-c", "explicit", "feature/b")
-				r.Switched(filepath.Join(repo, ".git"), "feature/a", "explicit")
+				r.Switched(t.Context(), filepath.Join(repo, ".git"), "feature/a", "explicit")
 
 				return repo, "explicit"
 			},
@@ -444,7 +454,7 @@ func TestRouteParentProvenance(t *testing.T) {
 		"an explicit main beats the branch switched from": {
 			setup: func(t *testing.T, repo string, r router.Router) string {
 				runGit(t, repo, "switch", "-q", "-c", "child", "main")
-				r.Switched(filepath.Join(repo, ".git"), "feature/a", "child")
+				r.Switched(t.Context(), filepath.Join(repo, ".git"), "feature/a", "child")
 
 				return "child"
 			},
@@ -454,11 +464,11 @@ func TestRouteParentProvenance(t *testing.T) {
 			setup: func(t *testing.T, repo string, r router.Router) string {
 				commonDir := filepath.Join(repo, ".git")
 				runGit(t, repo, "switch", "-q", "-c", "child")
-				r.Switched(commonDir, "feature/a", "child")
+				r.Switched(t.Context(), commonDir, "feature/a", "child")
 				runGit(t, repo, "switch", "-q", "feature/b")
-				r.Switched(commonDir, "child", "feature/b")
+				r.Switched(t.Context(), commonDir, "child", "feature/b")
 				runGit(t, repo, "switch", "-q", "child")
-				r.Switched(commonDir, "feature/b", "child")
+				r.Switched(t.Context(), commonDir, "feature/b", "child")
 
 				return "child"
 			},
@@ -469,7 +479,7 @@ func TestRouteParentProvenance(t *testing.T) {
 				runGitWith(t, repo, longAgo, "branch", "old", "feature/a")
 				runGit(t, repo, "switch", "-q", "feature/b")
 				runGit(t, repo, "switch", "-q", "old")
-				r.Switched(filepath.Join(repo, ".git"), "feature/b", "old")
+				r.Switched(t.Context(), filepath.Join(repo, ".git"), "feature/b", "old")
 
 				return "old"
 			},
@@ -497,6 +507,64 @@ func TestRouteParentProvenance(t *testing.T) {
 			require.NoError(t, err)
 
 			assert.Equal(t, []string{strings.Join(tt.wantSources, ",") + "->" + db(branch)}, cloner.ensured)
+		})
+	}
+}
+
+func TestSwitchedFollowsABranchRename(t *testing.T) {
+	t.Parallel()
+
+	db := func(name, branch string) string { return route.PhysicalName(name, branch, "main") }
+
+	tests := map[string]struct {
+		rename      func(t *testing.T, repo string) (from, to string)
+		wantRenamed []string
+	}{
+		"git branch -m": {
+			rename: func(t *testing.T, repo string) (string, string) {
+				runGit(t, repo, "branch", "-m", "feature/new")
+
+				return "feature/old", "feature/new"
+			},
+			wantRenamed: []string{
+				db("shop_development", "feature/old") + "->" + db("shop_development", "feature/new"),
+				db("shop_test", "feature/old") + "->" + db("shop_test", "feature/new"),
+			},
+		},
+		"a plain switch renames nothing": {
+			rename: func(t *testing.T, repo string) (string, string) {
+				runGit(t, repo, "switch", "-q", "-c", "feature/other")
+
+				return "feature/old", "feature/other"
+			},
+		},
+		"renaming to the default branch renames nothing": {
+			rename: func(t *testing.T, repo string) (string, string) {
+				runGit(t, repo, "branch", "-m", "main", "trunk")
+				runGit(t, repo, "branch", "-m", "feature/old", "main")
+
+				return "feature/old", "main"
+			},
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			repo := newRepo(t)
+			runGit(t, repo, "switch", "-q", "-c", "feature/old")
+			cloner := &fakeCloner{}
+			r := router.NewWithLookup(slog.New(slog.DiscardHandler), cloner, &fakeWatcher{}, lookupAt(repo))
+			for _, name := range []string{"shop_development", "shop_test", "shop_development"} {
+				_, err := r.Route(t.Context(), client, server, name)
+				require.NoError(t, err)
+			}
+
+			from, to := tt.rename(t, repo)
+			r.Switched(t.Context(), filepath.Join(repo, ".git"), from, to)
+
+			assert.Equal(t, tt.wantRenamed, cloner.renamed)
 		})
 	}
 }

@@ -24,6 +24,7 @@ var shared = map[string]bool{"postgres": true, "template0": true, "template1": t
 // Cloner creates a branch database before the first connection to it.
 type Cloner interface {
 	Ensure(ctx context.Context, target string, sources ...string) error
+	Rename(ctx context.Context, from, to string) error
 	Wait(ctx context.Context, db string) error
 }
 
@@ -36,11 +37,12 @@ type Watcher interface {
 // Router routes a connection to the database of the branch checked out where
 // the connecting process runs.
 type Router struct {
-	logger   *slog.Logger
-	cloner   Cloner
-	watcher  Watcher
-	lookup   lookupFunc
-	switches *switches
+	logger    *slog.Logger
+	cloner    Cloner
+	watcher   Watcher
+	lookup    lookupFunc
+	switches  *switches
+	databases *databases
 }
 
 type lookupFunc func(ctx context.Context, client, server netip.AddrPort) (peer.Process, error)
@@ -48,17 +50,32 @@ type lookupFunc func(ctx context.Context, client, server netip.AddrPort) (peer.P
 var _ proxy.Router = Router{}
 
 func New(logger *slog.Logger, cloner Cloner, watcher Watcher) Router {
-	return Router{logger: logger, cloner: cloner, watcher: watcher, lookup: peer.Lookup, switches: newSwitches()}
+	return Router{
+		logger:    logger,
+		cloner:    cloner,
+		watcher:   watcher,
+		lookup:    peer.Lookup,
+		switches:  newSwitches(),
+		databases: newDatabases(),
+	}
 }
 
 // creationWindow is how recently a branch must have been created for a switch
 // into it to count as its creation. The watcher polls far more often.
 const creationWindow = 5 * time.Second
 
-// Switched records that a worktree of the repository at commonDir went from
-// one branch to another. Only a switch into a branch just created says where
-// it came from, so a database for to can be cloned from from's.
-func (r Router) Switched(commonDir, from, to string) {
+// Switched learns from a worktree of the repository at commonDir going from
+// one branch to another. When git branch -m renamed from to to, the branch's
+// databases are renamed along. Otherwise only a switch into a branch just
+// created says where it came from, so a database for to can be cloned from
+// from's.
+func (r Router) Switched(ctx context.Context, commonDir, from, to string) {
+	if old, renamed, err := ref.RenamedFrom(commonDir, to); err == nil && renamed && old == from {
+		r.followRename(ctx, commonDir, from, to)
+
+		return
+	}
+
 	creation, ok, err := ref.CreatedFrom(commonDir, to)
 	if err != nil || !ok || time.Since(creation.At) > creationWindow {
 		return
@@ -134,6 +151,7 @@ func (r Router) resolve(ctx context.Context, client, server net.Addr, database s
 		return attribution{physical: database}
 	}
 	r.watcher.Add(wt.CommonDir)
+	r.databases.add(wt.CommonDir, database)
 
 	branch, ok, err := wt.Branch()
 	if err != nil {
@@ -168,4 +186,32 @@ func (r Router) resolve(ctx context.Context, client, server net.Addr, database s
 	logger.Debug("attributed", "worktree", wt.Root, "branch", branch, "physical", physical)
 
 	return attribution{physical: physical, owner: wt.Root, sources: sources}
+}
+
+// followRename moves each database the repository's connections used from
+// the old branch's name to the new one's. The default branch keeps the
+// requested names, so renaming to or from it would change what they mean; it
+// is left alone.
+func (r Router) followRename(ctx context.Context, commonDir, from, to string) {
+	logger := r.logger.With("repo", commonDir, "from", from, "to", to)
+
+	defaultBranch, err := git.Worktree{CommonDir: commonDir}.DefaultBranch()
+	if err != nil {
+		logger.Warn("follow branch rename", "err", err)
+
+		return
+	}
+	if from == defaultBranch || to == defaultBranch {
+		logger.Info("not following a rename of the default branch")
+
+		return
+	}
+
+	for _, db := range r.databases.of(commonDir) {
+		oldName := route.PhysicalName(db, from, defaultBranch)
+		newName := route.PhysicalName(db, to, defaultBranch)
+		if err := r.cloner.Rename(ctx, oldName, newName); err != nil {
+			logger.Warn("follow branch rename", "database", db, "err", err)
+		}
+	}
 }

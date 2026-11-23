@@ -61,7 +61,7 @@ func runServe(ctx context.Context, args []string, std IO) int {
 	)
 	w := watch.New(logger, func(c watch.Change) {
 		logger.Info("switched", "worktree", c.Worktree, "from", c.From, "to", c.To)
-		r.Switched(c.CommonDir, c.From, c.To)
+		r.Switched(ctx, c.CommonDir, c.From, c.To)
 		p.Sever(c.Worktree)
 	})
 	r = router.New(logger, clone.New(admin, logger), w)
