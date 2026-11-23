@@ -1,7 +1,8 @@
 package pgclone
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 
 	"github.com/mickamy/pgswitch/internal/clone"
@@ -25,7 +26,7 @@ func labelComment(db string, label clone.Label) (string, error) {
 		Repo:     label.Repo,
 		Branch:   label.Branch,
 		Database: label.Database,
-	})
+	}, jsontext.AllowInvalidUTF8(true))
 	if err != nil {
 		return "", fmt.Errorf("pgclone: label %s: %w", db, err)
 	}

@@ -60,6 +60,18 @@ func TestStatus(t *testing.T) { //nolint:paralleltest // t.Chdir changes the pro
 	assert.Equal(t, want, got)
 }
 
+func TestStatusReplacesInvalidUTF8(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
+	t.Chdir(t.TempDir())
+	serve(t, func() control.Status {
+		return control.Status{Connections: []control.Connection{{Worktree: "/src/caf\xe9"}}}
+	})
+
+	got, err := control.NewClient(socket).Status(t.Context())
+	require.NoError(t, err)
+
+	assert.Equal(t, "/src/caf\uFFFD", got.Connections[0].Worktree)
+}
+
 func TestListenRefusesARunningServe(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
 	t.Chdir(t.TempDir())
 	serve(t, func() control.Status { return control.Status{} })
@@ -225,6 +237,22 @@ func TestLog(t *testing.T) { //nolint:paralleltest // t.Chdir changes the proces
 	require.NoError(t, control.NewClient(socket).Log(t.Context(), false, func(e events.Event) { got = append(got, e) }))
 
 	assert.Equal(t, []events.Event{{Message: "routed", Attrs: map[string]string{"database": "shop_test"}}}, got)
+}
+
+func TestLogReplacesInvalidUTF8(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
+	t.Chdir(t.TempDir())
+	log := events.New()
+	log.Add(events.Event{Message: "routed", Attrs: map[string]string{"branch": "caf\xe9"}})
+	log.Add(events.Event{Message: "cloned"})
+	serveSource(t, control.Source{Status: func() control.Status { return control.Status{} }, Events: log})
+
+	var got []events.Event
+	require.NoError(t, control.NewClient(socket).Log(t.Context(), false, func(e events.Event) { got = append(got, e) }))
+
+	assert.Equal(t, []events.Event{
+		{Message: "routed", Attrs: map[string]string{"branch": "caf\uFFFD"}},
+		{Message: "cloned"},
+	}, got, "the stream goes on past the invalid event")
 }
 
 func TestLogFollow(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
