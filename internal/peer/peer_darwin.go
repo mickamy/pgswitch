@@ -12,12 +12,12 @@ import (
 // lsof exits with 1 when nothing matches.
 const lsofNoMatch = 1
 
-func lookup(ctx context.Context, client netip.AddrPort) (Process, error) {
+func lookup(ctx context.Context, client, server netip.AddrPort) (Process, error) {
 	out, err := runLsof(ctx, "-nP", "-iTCP@"+client.String(), "-sTCP:ESTABLISHED", "-Fpn")
 	if err != nil {
 		return Process{}, err
 	}
-	pid, ok := pidFromLsof(out, client.String())
+	pid, ok := pidFromLsof(out, client.String(), server.String())
 	if !ok {
 		return Process{}, ErrNotFound
 	}

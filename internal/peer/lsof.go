@@ -10,9 +10,9 @@ import (
 // lsof -F output is one field per line, each prefixed by its type:
 // p<pid>, f<fd>, n<name>.
 
-// pidFromLsof returns the process whose socket name starts at client.
-func pidFromLsof(out []byte, client string) (int, bool) {
-	prefix := client + "->"
+// pidFromLsof returns the process whose socket connects client to server.
+func pidFromLsof(out []byte, client, server string) (int, bool) {
+	want := client + "->" + server
 	pid := 0
 	sc := bufio.NewScanner(bytes.NewReader(out))
 	for sc.Scan() {
@@ -22,7 +22,7 @@ func pidFromLsof(out []byte, client string) (int, bool) {
 
 			continue
 		}
-		if name, ok := strings.CutPrefix(line, "n"); ok && pid > 0 && strings.HasPrefix(name, prefix) {
+		if name, ok := strings.CutPrefix(line, "n"); ok && pid > 0 && name == want {
 			return pid, true
 		}
 	}

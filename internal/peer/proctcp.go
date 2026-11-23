@@ -13,13 +13,14 @@ import (
 const (
 	tcpEstablished = "01"
 	fieldLocal     = 1
+	fieldRemote    = 2
 	fieldState     = 3
 	fieldInode     = 9
 )
 
-// inodeFromProcNetTCP returns the inode of the established socket bound to
-// client in the content of /proc/net/tcp or /proc/net/tcp6.
-func inodeFromProcNetTCP(content []byte, client netip.AddrPort) (string, bool) {
+// inodeFromProcNetTCP returns the inode of the established socket from client
+// to server in the content of /proc/net/tcp or /proc/net/tcp6.
+func inodeFromProcNetTCP(content []byte, client, server netip.AddrPort) (string, bool) {
 	sc := bufio.NewScanner(bytes.NewReader(content))
 	sc.Scan() // header
 	for sc.Scan() {
@@ -27,8 +28,9 @@ func inodeFromProcNetTCP(content []byte, client netip.AddrPort) (string, bool) {
 		if len(fields) <= fieldInode || fields[fieldState] != tcpEstablished {
 			continue
 		}
-		local, ok := parseProcAddr(fields[fieldLocal])
-		if ok && local == client {
+		local, okLocal := parseProcAddr(fields[fieldLocal])
+		remote, okRemote := parseProcAddr(fields[fieldRemote])
+		if okLocal && okRemote && local == client && remote == server {
 			return fields[fieldInode], true
 		}
 	}

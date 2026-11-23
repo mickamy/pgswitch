@@ -21,17 +21,18 @@ const (
 
 var errTooManyNegotiations = errors.New("too many SSL/GSS negotiation requests")
 
-// Router picks the physical database for a connection.
+// Router picks the physical database for a connection. client and server are
+// the two ends of the accepted connection.
 type Router interface {
-	Route(ctx context.Context, client net.Addr, database string) (string, error)
+	Route(ctx context.Context, client, server net.Addr, database string) (string, error)
 }
 
-type RouterFunc func(ctx context.Context, client net.Addr, database string) (string, error)
+type RouterFunc func(ctx context.Context, client, server net.Addr, database string) (string, error)
 
 var _ Router = RouterFunc(nil)
 
-func (f RouterFunc) Route(ctx context.Context, client net.Addr, database string) (string, error) {
-	return f(ctx, client, database)
+func (f RouterFunc) Route(ctx context.Context, client, server net.Addr, database string) (string, error) {
+	return f(ctx, client, server, database)
 }
 
 type Proxy struct {
@@ -98,7 +99,7 @@ func (p Proxy) handle(ctx context.Context, client net.Conn) {
 	}
 
 	requested := startup.Database()
-	physical, err := p.router.Route(ctx, client.RemoteAddr(), requested)
+	physical, err := p.router.Route(ctx, client.RemoteAddr(), client.LocalAddr(), requested)
 	if err != nil {
 		reject(client, logger, pgwire.CodeConnectionRejection, "pgswitch: route "+requested+": "+err.Error())
 

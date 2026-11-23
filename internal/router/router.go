@@ -17,8 +17,10 @@ import (
 // the connecting process runs.
 type Router struct {
 	logger *slog.Logger
-	lookup func(context.Context, netip.AddrPort) (peer.Process, error)
+	lookup lookupFunc
 }
+
+type lookupFunc func(ctx context.Context, client, server netip.AddrPort) (peer.Process, error)
 
 var _ proxy.Router = Router{}
 
@@ -28,16 +30,17 @@ func New(logger *slog.Logger) Router {
 
 // Route never fails: a connection it cannot attribute goes to the default
 // branch, which keeps the requested name.
-func (r Router) Route(ctx context.Context, client net.Addr, database string) (string, error) {
+func (r Router) Route(ctx context.Context, client, server net.Addr, database string) (string, error) {
 	logger := r.logger.With("client", client.String(), "database", database)
 
-	tcp, ok := client.(*net.TCPAddr)
-	if !ok {
+	clientTCP, okClient := client.(*net.TCPAddr)
+	serverTCP, okServer := server.(*net.TCPAddr)
+	if !okClient || !okServer {
 		logger.Warn("unattributed connection", "reason", "not a TCP connection")
 
 		return database, nil
 	}
-	proc, err := r.lookup(ctx, tcp.AddrPort())
+	proc, err := r.lookup(ctx, clientTCP.AddrPort(), serverTCP.AddrPort())
 	if err != nil {
 		logger.Warn("unattributed connection", "err", err)
 

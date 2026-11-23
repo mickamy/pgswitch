@@ -20,7 +20,12 @@ import (
 
 const database = "shop_development"
 
-var client = &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 50274}
+var (
+	client = &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 50274}
+	server = &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 6432}
+)
+
+type lookupFunc = func(ctx context.Context, client, server netip.AddrPort) (peer.Process, error)
 
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
@@ -52,8 +57,8 @@ func newRepo(t *testing.T) string {
 	return dir
 }
 
-func lookupAt(cwd string) func(context.Context, netip.AddrPort) (peer.Process, error) {
-	return func(context.Context, netip.AddrPort) (peer.Process, error) {
+func lookupAt(cwd string) lookupFunc {
+	return func(context.Context, netip.AddrPort, netip.AddrPort) (peer.Process, error) {
 		return peer.Process{PID: 42, Cwd: cwd}, nil
 	}
 }
@@ -110,7 +115,7 @@ func TestRoute(t *testing.T) {
 			cwd := tt.setup(t, newRepo(t))
 			r := router.NewWithLookup(slog.New(slog.DiscardHandler), lookupAt(cwd))
 
-			got, err := r.Route(t.Context(), client, database)
+			got, err := r.Route(t.Context(), client, server, database)
 			require.NoError(t, err)
 
 			assert.Equal(t, tt.want, got)
@@ -118,16 +123,34 @@ func TestRoute(t *testing.T) {
 	}
 }
 
+func TestRouteLooksUpBothEnds(t *testing.T) {
+	t.Parallel()
+
+	var gotClient, gotServer netip.AddrPort
+	r := router.NewWithLookup(slog.New(slog.DiscardHandler),
+		func(_ context.Context, c, s netip.AddrPort) (peer.Process, error) {
+			gotClient, gotServer = c, s
+
+			return peer.Process{}, peer.ErrNotFound
+		})
+
+	_, err := r.Route(t.Context(), client, server, database)
+	require.NoError(t, err)
+
+	assert.Equal(t, client.AddrPort(), gotClient)
+	assert.Equal(t, server.AddrPort(), gotServer)
+}
+
 func TestRouteUnattributed(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]struct {
 		client net.Addr
-		lookup func(context.Context, netip.AddrPort) (peer.Process, error)
+		lookup lookupFunc
 	}{
 		"lookup fails": {
 			client: client,
-			lookup: func(context.Context, netip.AddrPort) (peer.Process, error) {
+			lookup: func(context.Context, netip.AddrPort, netip.AddrPort) (peer.Process, error) {
 				return peer.Process{}, peer.ErrNotFound
 			},
 		},
@@ -143,7 +166,7 @@ func TestRouteUnattributed(t *testing.T) {
 
 			r := router.NewWithLookup(slog.New(slog.DiscardHandler), tt.lookup)
 
-			got, err := r.Route(t.Context(), tt.client, database)
+			got, err := r.Route(t.Context(), tt.client, server, database)
 			require.NoError(t, err)
 
 			assert.Equal(t, database, got)

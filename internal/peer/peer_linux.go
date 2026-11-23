@@ -11,8 +11,8 @@ import (
 
 const procRoot = "/proc"
 
-func lookup(ctx context.Context, client netip.AddrPort) (Process, error) {
-	inode, err := socketInode(client)
+func lookup(ctx context.Context, client, server netip.AddrPort) (Process, error) {
+	inode, err := socketInode(client, server)
 	if err != nil {
 		return Process{}, err
 	}
@@ -31,13 +31,13 @@ func lookup(ctx context.Context, client netip.AddrPort) (Process, error) {
 
 // socketInode searches both tables: a dual-stack socket connecting over IPv4
 // is listed in tcp6 with a mapped address.
-func socketInode(client netip.AddrPort) (string, error) {
+func socketInode(client, server netip.AddrPort) (string, error) {
 	for _, table := range []string{"tcp", "tcp6"} {
 		content, err := os.ReadFile(filepath.Join(procRoot, "net", table))
 		if err != nil {
 			continue
 		}
-		if inode, ok := inodeFromProcNetTCP(content, client); ok {
+		if inode, ok := inodeFromProcNetTCP(content, client, server); ok {
 			return inode, nil
 		}
 	}

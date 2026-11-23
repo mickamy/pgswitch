@@ -91,7 +91,7 @@ func startupPacket(params ...pgwire.Param) []byte {
 }
 
 func fixedRouter(physical string) proxy.Router {
-	return proxy.RouterFunc(func(context.Context, net.Addr, string) (string, error) {
+	return proxy.RouterFunc(func(context.Context, net.Addr, net.Addr, string) (string, error) {
 		return physical, nil
 	})
 }
@@ -116,11 +116,12 @@ func TestProxyRoutesStartup(t *testing.T) {
 
 	type routed struct {
 		client   net.Addr
+		server   net.Addr
 		database string
 	}
 	calls := make(chan routed, 1)
-	router := proxy.RouterFunc(func(_ context.Context, client net.Addr, database string) (string, error) {
-		calls <- routed{client: client, database: database}
+	router := proxy.RouterFunc(func(_ context.Context, client, server net.Addr, database string) (string, error) {
+		calls <- routed{client: client, server: server, database: database}
 
 		return database + "__fix_tax", nil
 	})
@@ -152,6 +153,7 @@ func TestProxyRoutesStartup(t *testing.T) {
 	call := <-calls
 	assert.Equal(t, "shop_development", call.database)
 	assert.Equal(t, conn.LocalAddr().String(), call.client.String())
+	assert.Equal(t, conn.RemoteAddr().String(), call.server.String())
 
 	_, err = conn.Write([]byte("ping"))
 	require.NoError(t, err)
@@ -250,7 +252,7 @@ func TestProxyRejects(t *testing.T) {
 
 	upstream, _ := startUpstream(t)
 	unreachable := closedAddr(t)
-	failingRouter := proxy.RouterFunc(func(context.Context, net.Addr, string) (string, error) {
+	failingRouter := proxy.RouterFunc(func(context.Context, net.Addr, net.Addr, string) (string, error) {
 		return "", errors.New("no repository")
 	})
 	validStartup := startupPacket(pgwire.Param{Name: "user", Value: "alice"})

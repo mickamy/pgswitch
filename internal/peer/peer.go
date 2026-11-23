@@ -18,8 +18,13 @@ type Process struct {
 	Cwd string
 }
 
-// Lookup finds the local process whose TCP socket is bound to client, the
-// address a connection to us came from.
-func Lookup(ctx context.Context, client netip.AddrPort) (Process, error) {
-	return lookup(ctx, netip.AddrPortFrom(client.Addr().Unmap(), client.Port()))
+// Lookup finds the local process that owns the client end of the TCP
+// connection between client and server. Both ends are needed: sockets to
+// different destinations can share a source address.
+func Lookup(ctx context.Context, client, server netip.AddrPort) (Process, error) {
+	return lookup(ctx, unmap(client), unmap(server))
+}
+
+func unmap(a netip.AddrPort) netip.AddrPort {
+	return netip.AddrPortFrom(a.Addr().Unmap(), a.Port())
 }
