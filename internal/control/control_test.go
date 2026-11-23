@@ -2,6 +2,7 @@ package control_test
 
 import (
 	"context"
+	"net"
 	"os"
 	"testing"
 	"time"
@@ -61,12 +62,51 @@ func TestListenRefusesARunningServe(t *testing.T) { //nolint:paralleltest // t.C
 
 func TestListenReplacesAStaleSocket(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
 	t.Chdir(t.TempDir())
-	require.NoError(t, os.WriteFile(socket, nil, 0o600)) // left behind, nobody listening
+	leaveStaleSocket(t)
 
 	ln, err := control.Listen(t.Context(), socket)
 	require.NoError(t, err)
 
 	assert.NoError(t, ln.Close())
+}
+
+func TestListenLeavesOtherFilesAlone(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
+	t.Chdir(t.TempDir())
+	require.NoError(t, os.WriteFile(socket, []byte("keep me"), 0o600))
+
+	_, err := control.Listen(t.Context(), socket)
+	require.Error(t, err)
+
+	got, err := os.ReadFile(socket)
+	require.NoError(t, err)
+	assert.Equal(t, "keep me", string(got))
+}
+
+func TestListenCanceledLeavesARunningServe(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
+	t.Chdir(t.TempDir())
+	serve(t, func() control.Status { return control.Status{} })
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := control.Listen(ctx, socket)
+	require.Error(t, err)
+
+	_, err = control.NewClient(socket).Status(t.Context())
+	assert.NoError(t, err, "the running serve still answers")
+}
+
+// leaveStaleSocket leaves a socket file behind with nobody listening, as a
+// serve that crashed does.
+func leaveStaleSocket(t *testing.T) {
+	t.Helper()
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "unix", socket)
+	require.NoError(t, err)
+	unix, ok := ln.(*net.UnixListener)
+	require.True(t, ok)
+	unix.SetUnlinkOnClose(false)
+	require.NoError(t, ln.Close())
 }
 
 func TestClientWithoutServe(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd

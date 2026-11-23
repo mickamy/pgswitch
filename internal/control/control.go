@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"syscall"
 	"time"
 )
 
@@ -38,17 +39,12 @@ type Status struct {
 	Connections []Connection `json:"connections"`
 }
 
-// Listen opens the control socket at path, replacing one left behind by a
-// serve that is gone, but not one still answering.
+// Listen opens the control socket at path. A socket left behind by a serve
+// that is gone is replaced; one still answering, or anything that is not a
+// socket, is left alone.
 func Listen(ctx context.Context, path string) (net.Listener, error) {
-	var d net.Dialer
-	if conn, err := d.DialContext(ctx, "unix", path); err == nil {
-		_ = conn.Close()
-
-		return nil, fmt.Errorf("%w: %s", ErrRunning, path)
-	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("control: %w", err)
+	if err := removeStale(ctx, path); err != nil {
+		return nil, err
 	}
 
 	var lc net.ListenConfig
@@ -58,6 +54,38 @@ func Listen(ctx context.Context, path string) (net.Listener, error) {
 	}
 
 	return ln, nil
+}
+
+// removeStale removes path only when it is a socket nobody listens on.
+func removeStale(ctx context.Context, path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("control: %w", err)
+	}
+	if info.Mode().IsRegular() || info.IsDir() {
+		return fmt.Errorf("control: %s exists and is not a socket", path)
+	}
+
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "unix", path)
+	switch {
+	case err == nil:
+		_ = conn.Close()
+
+		return fmt.Errorf("%w: %s", ErrRunning, path)
+	case !errors.Is(err, syscall.ECONNREFUSED):
+		// Canceled, timed out or denied: no proof the socket is stale.
+		return fmt.Errorf("control: probe %s: %w", path, err)
+	}
+
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("control: %w", err)
+	}
+
+	return nil
 }
 
 // Serve answers status requests on ln until ctx ends.
