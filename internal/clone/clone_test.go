@@ -30,6 +30,11 @@ type fakeAdmin struct {
 	// When gate is set, Copy signals started and blocks until gate closes.
 	gate    chan struct{}
 	started chan struct{}
+
+	// When existsGate is set, Exists for slowExists does the same.
+	slowExists   string
+	existsGate   chan struct{}
+	existsCalled chan struct{}
 }
 
 var _ clone.Admin = (*fakeAdmin)(nil)
@@ -44,6 +49,11 @@ func newFakeAdmin(dbs ...string) *fakeAdmin {
 }
 
 func (a *fakeAdmin) Exists(_ context.Context, db string) (bool, error) {
+	if a.existsGate != nil && db == a.slowExists {
+		a.existsCalled <- struct{}{}
+		<-a.existsGate
+	}
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -392,4 +402,30 @@ func TestEnsureWaitsForARenameInsteadOfCloning(t *testing.T) {
 	require.NoError(t, <-ensured)
 	copies, _ := admin.snapshot()
 	assert.Empty(t, copies, "the renamed database is used, not a fresh clone")
+}
+
+func TestEnsureClonesAfterARenameWithNothingToMove(t *testing.T) {
+	t.Parallel()
+
+	const missingOld = "shop_development__feature_old_00000000"
+
+	admin := newFakeAdmin(source)
+	admin.slowExists = missingOld
+	admin.existsGate = make(chan struct{})
+	admin.existsCalled = make(chan struct{}, 1)
+	c := newCloner(admin)
+
+	renaming := make(chan error, 1)
+	go func() { renaming <- c.Rename(t.Context(), missingOld, target) }()
+	<-admin.existsCalled // the rename is checking for the old database
+
+	ensured := make(chan error, 1)
+	go func() { ensured <- c.Ensure(t.Context(), target, source) }()
+	time.Sleep(20 * time.Millisecond) // let Ensure join the rename's flight
+	close(admin.existsGate)
+
+	require.NoError(t, <-renaming)
+	require.NoError(t, <-ensured)
+	copies, _ := admin.snapshot()
+	assert.Equal(t, []string{source + "->" + target}, copies, "Ensure cloned once the rename moved nothing")
 }

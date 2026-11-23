@@ -12,6 +12,7 @@ import (
 const (
 	defaultTimeout       = 30 * time.Second
 	defaultRetryInterval = 200 * time.Millisecond
+	ensureAttempts       = 3
 )
 
 var (
@@ -70,16 +71,25 @@ func New(admin Admin, logger *slog.Logger) *Cloner {
 
 // Ensure makes target exist, cloning it when it does not from the first of
 // sources that exists. Concurrent calls for one target share a single clone.
+// The flight it joins may be a rename that found nothing to move, so it checks
+// again after each one.
 func (c *Cloner) Ensure(ctx context.Context, target string, sources ...string) error {
-	exists, err := c.admin.Exists(ctx, target)
-	if err != nil {
-		return fmt.Errorf("clone: check %s: %w", target, err)
-	}
-	if exists {
-		return nil
+	for range ensureAttempts {
+		exists, err := c.admin.Exists(ctx, target)
+		if err != nil {
+			return fmt.Errorf("clone: check %s: %w", target, err)
+		}
+		if exists {
+			return nil
+		}
+
+		err = c.join(ctx, target, func(ctx context.Context) error { return c.clone(ctx, target, sources) })
+		if err != nil {
+			return err
+		}
 	}
 
-	return c.join(ctx, target, func(ctx context.Context) error { return c.clone(ctx, target, sources) })
+	return fmt.Errorf("clone: %s is still missing after %d attempts", target, ensureAttempts)
 }
 
 // Rename renames from to to, as when a branch is renamed, unless to already
