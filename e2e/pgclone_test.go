@@ -196,3 +196,34 @@ func TestPGCloneAsNonSuperuser(t *testing.T) {
 		" and datdba = (select oid from pg_roles where rolname = '"+role+"'))"),
 		"neither the target nor the staging database is left")
 }
+
+func TestPGCloneRenames(t *testing.T) {
+	t.Parallel()
+
+	cfg := adminConfig(t)
+	admin := connect(t, cfg)
+	from := uniqueName("pgswitch_e2e")
+	to := from + "__renamed"
+	createDatabase(t, admin, from)
+	dropOnCleanup(t, admin, to)
+
+	onFrom := cfg
+	onFrom.Database = from
+	session := connect(t, onFrom)
+	require.NoError(t, session.Exec(t.Context(), "create table coupons (code text)"))
+	require.NoError(t, session.Exec(t.Context(), "insert into coupons values ('KEPT')"))
+
+	a := pgclone.New(cfg)
+	require.ErrorIs(t, a.Rename(t.Context(), from, to), clone.ErrSourceBusy, "a session is still on it")
+
+	_, err := a.Terminate(t.Context(), from)
+	require.NoError(t, err)
+	require.NoError(t, a.Rename(t.Context(), from, to))
+
+	onTo := cfg
+	onTo.Database = to
+	assert.Equal(t, "KEPT", queryValue(t, connect(t, onTo), "select code from coupons"))
+	exists, err := a.Exists(t.Context(), from)
+	require.NoError(t, err)
+	assert.False(t, exists)
+}

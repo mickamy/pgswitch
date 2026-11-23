@@ -116,6 +116,26 @@ func (a Admin) Copy(ctx context.Context, source, target string) error {
 	return nil
 }
 
+// Rename renames from to to.
+func (a Admin) Rename(ctx context.Context, from, to string) error {
+	conn, done, err := a.connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer done()
+
+	err = conn.Exec(ctx, "alter database "+quote.Ident(from)+" rename to "+quote.Ident(to))
+	var serverErr pgwire.ServerError
+	switch {
+	case err == nil:
+		return nil
+	case errors.As(err, &serverErr) && serverErr.Code == codeObjectInUse:
+		return fmt.Errorf("%w: %w", clone.ErrSourceBusy, err)
+	default:
+		return fmt.Errorf("pgclone: rename %s: %w", from, err)
+	}
+}
+
 // createStaging copies source under a fresh name. It never drops a database it
 // did not create: a name that is taken is skipped, not reclaimed.
 func (a Admin) createStaging(ctx context.Context, conn pgadmin.Conn, source, owner string) (string, error) {
