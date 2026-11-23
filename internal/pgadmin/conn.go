@@ -140,6 +140,9 @@ func (c Conn) startup(ctx context.Context, cfg Config) (int, error) {
 			{Name: "user", Value: cfg.User},
 			{Name: "database", Value: db},
 			{Name: "application_name", Value: applicationName},
+			// quote.Literal relies on an encoding where a backslash byte is
+			// always a backslash; startup parameters override role settings.
+			{Name: "client_encoding", Value: "UTF8"},
 		},
 	}
 	if _, err := c.conn.Write(startup.Packet().Bytes()); err != nil {

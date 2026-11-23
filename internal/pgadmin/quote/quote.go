@@ -7,8 +7,10 @@ func Ident(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
-// Literal quotes a string literal. It assumes standard_conforming_strings,
-// the default since Postgres 9.1, under which backslashes are not special.
+// Literal quotes a string literal. It uses the E'...' form, whose backslash
+// escapes do not depend on standard_conforming_strings, as quote_literal does.
+// The connection must use a client_encoding such as UTF8 where a backslash byte
+// never ends a multibyte character.
 func Literal(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+	return "E'" + strings.NewReplacer(`\`, `\\`, "'", "''").Replace(s) + "'"
 }

@@ -3,6 +3,7 @@
 package e2e_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -54,4 +55,39 @@ func TestPGCloneCopiesData(t *testing.T) {
 		queryValue(t, admin, "select pg_get_userbyid(datdba) from pg_database where datname = '"+source+"'"),
 		queryValue(t, admin, "select pg_get_userbyid(datdba) from pg_database where datname = '"+target+"'"),
 	)
+}
+
+// TestPGCloneQuotesRegardlessOfStringSettings runs as a role with
+// standard_conforming_strings off, where backslashes in plain literals escape.
+func TestPGCloneQuotesRegardlessOfStringSettings(t *testing.T) {
+	t.Parallel()
+
+	cfg := adminConfig(t)
+	admin := connect(t, cfg)
+
+	role := uniqueName("pgswitch_e2e_role")
+	password := uniqueName("pw")
+	require.NoError(t, admin.Exec(t.Context(), `create role "`+role+`" login superuser password '`+password+`'`))
+	t.Cleanup(func() { _ = admin.Exec(context.WithoutCancel(t.Context()), `drop role if exists "`+role+`"`) })
+	require.NoError(t, admin.Exec(t.Context(), `alter role "`+role+`" set standard_conforming_strings = off`))
+
+	asRole := cfg
+	asRole.User = role
+	asRole.Password = password
+	require.Equal(t, "off", queryValue(t, connect(t, asRole), "show standard_conforming_strings"))
+
+	existing := uniqueName("pgswitch_e2e") + `\'x`
+	createDatabase(t, admin, existing)
+
+	a := pgclone.New(asRole)
+	for name, want := range map[string]bool{
+		`x\' or true --`: false,
+		`a\b`:            false,
+		`o'brien`:        false,
+		existing:         true,
+	} {
+		exists, err := a.Exists(t.Context(), name)
+		require.NoError(t, err, name)
+		assert.Equal(t, want, exists, name)
+	}
 }

@@ -37,10 +37,11 @@ func TestLiteral(t *testing.T) {
 		in   string
 		want string
 	}{
-		"plain":        {in: "shop_development", want: `'shop_development'`},
-		"single quote": {in: "o'brien", want: `'o''brien'`},
-		"backslash":    {in: `a\b`, want: `'a\b'`},
-		"empty":        {in: "", want: `''`},
+		"plain":        {in: "shop_development", want: `E'shop_development'`},
+		"single quote": {in: "o'brien", want: `E'o''brien'`},
+		"backslash":    {in: `a\b`, want: `E'a\\b'`},
+		"escape quote": {in: `x\' or true --`, want: `E'x\\'' or true --'`},
+		"empty":        {in: "", want: `E''`},
 	}
 
 	for name, tt := range tests {
