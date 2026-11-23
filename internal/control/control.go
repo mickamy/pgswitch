@@ -5,15 +5,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/mickamy/pgswitch/internal/events"
 )
 
 const (
 	statusPath        = "/status"
+	logPath           = "/log"
 	readHeaderTimeout = 5 * time.Second
 	shutdownTimeout   = 5 * time.Second
 )
@@ -118,12 +122,21 @@ func removeStale(ctx context.Context, path string) error {
 	return nil
 }
 
-// Serve answers status requests on ln until ctx ends.
-func Serve(ctx context.Context, ln net.Listener, status func() Status) error {
+// Source is what serve reports through the control socket.
+type Source struct {
+	Status func() Status
+	Events *events.Log
+}
+
+// Serve answers status and log requests on ln until ctx ends.
+func Serve(ctx context.Context, ln net.Listener, src Source) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+statusPath, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(status())
+		_ = json.NewEncoder(w).Encode(src.Status())
+	})
+	mux.HandleFunc("GET "+logPath, func(w http.ResponseWriter, r *http.Request) {
+		serveLog(ctx.Done(), w, r, src.Events)
 	})
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: readHeaderTimeout}
 
@@ -139,6 +152,47 @@ func Serve(ctx context.Context, ln net.Listener, status func() Status) error {
 	}
 
 	return nil
+}
+
+// serveLog writes the events kept as JSON lines and, with ?follow=1, the ones
+// that come after, until the client leaves or stopped closes.
+func serveLog(stopped <-chan struct{}, w http.ResponseWriter, r *http.Request, log *events.Log) {
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	enc := json.NewEncoder(w)
+
+	if r.URL.Query().Get("follow") == "" {
+		for _, e := range log.Recent() {
+			if err := enc.Encode(e); err != nil {
+				return
+			}
+		}
+
+		return
+	}
+
+	recent, next := log.Follow(r.Context())
+	flusher, _ := w.(http.Flusher)
+	for _, e := range recent {
+		if err := enc.Encode(e); err != nil {
+			return
+		}
+	}
+	for {
+		if flusher != nil {
+			flusher.Flush()
+		}
+		select {
+		case e, ok := <-next:
+			if !ok {
+				return
+			}
+			if err := enc.Encode(e); err != nil {
+				return
+			}
+		case <-stopped:
+			return
+		}
+	}
 }
 
 // Client asks a running serve over its control socket.
@@ -177,4 +231,38 @@ func (c Client) Status(ctx context.Context) (Status, error) {
 	}
 
 	return s, nil
+}
+
+// Log hands each event to fn: those kept and, when follow is set, the ones
+// that come after, until ctx ends.
+func (c Client) Log(ctx context.Context, follow bool, fn func(events.Event)) error {
+	url := "http://pgswitch" + logPath
+	if follow {
+		url += "?follow=1"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("control: %w", err)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("control: is pgswitch serve running? %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("control: log: %s", resp.Status)
+	}
+	dec := json.NewDecoder(resp.Body)
+	for {
+		var e events.Event
+		err := dec.Decode(&e)
+		switch {
+		case errors.Is(err, io.EOF), err != nil && ctx.Err() != nil:
+			return nil
+		case err != nil:
+			return fmt.Errorf("control: %w", err)
+		}
+		fn(e)
+	}
 }

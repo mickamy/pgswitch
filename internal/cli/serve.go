@@ -13,6 +13,7 @@ import (
 	"github.com/mickamy/pgswitch/internal/clone"
 	"github.com/mickamy/pgswitch/internal/clone/pgclone"
 	"github.com/mickamy/pgswitch/internal/control"
+	"github.com/mickamy/pgswitch/internal/events"
 	"github.com/mickamy/pgswitch/internal/exit"
 	"github.com/mickamy/pgswitch/internal/pgadmin"
 	"github.com/mickamy/pgswitch/internal/proxy"
@@ -73,7 +74,7 @@ func runServe(ctx context.Context, args []string, std IO) int {
 	go w.Run(ctx)
 
 	if *controlPath != "" {
-		if err := serveControl(ctx, *controlPath, p, logger); err != nil {
+		if err := serveControl(ctx, *controlPath, p, events.New(), logger); err != nil {
 			return fail(std, err)
 		}
 	}
@@ -108,7 +109,7 @@ func defaultControl() string {
 }
 
 // serveControl answers pgswitch status on the socket at path until ctx ends.
-func serveControl(ctx context.Context, path string, p proxy.Proxy, logger *slog.Logger) error {
+func serveControl(ctx context.Context, path string, p proxy.Proxy, log *events.Log, logger *slog.Logger) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("control socket: %w", err)
 	}
@@ -117,7 +118,8 @@ func serveControl(ctx context.Context, path string, p proxy.Proxy, logger *slog.
 		return fmt.Errorf("control socket: %w", err)
 	}
 	go func() {
-		if err := control.Serve(ctx, ln, func() control.Status { return statusOf(p.Conns()) }); err != nil {
+		src := control.Source{Status: func() control.Status { return statusOf(p.Conns()) }, Events: log}
+		if err := control.Serve(ctx, ln, src); err != nil {
 			logger.Warn("control socket", "err", err)
 		}
 	}()

@@ -13,6 +13,7 @@ import (
 
 	"github.com/mickamy/pgswitch/internal/cli"
 	"github.com/mickamy/pgswitch/internal/control"
+	"github.com/mickamy/pgswitch/internal/events"
 	"github.com/mickamy/pgswitch/internal/exit"
 )
 
@@ -27,7 +28,8 @@ func serveStatus(t *testing.T, s control.Status) {
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
-	go func() { done <- control.Serve(ctx, ln, func() control.Status { return s }) }()
+	src := control.Source{Status: func() control.Status { return s }, Events: events.New()}
+	go func() { done <- control.Serve(ctx, ln, src) }()
 	t.Cleanup(func() {
 		cancel()
 		assert.NoError(t, <-done)
