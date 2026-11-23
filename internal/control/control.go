@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"syscall"
 	"time"
 )
 
@@ -39,25 +38,55 @@ type Status struct {
 	Connections []Connection `json:"connections"`
 }
 
-// Listen opens the control socket at path. A socket left behind by a serve
-// that is gone is replaced; one still answering, or anything that is not a
-// socket, is left alone.
+var errLocked = errors.New("control: locked")
+
+// Listen opens the control socket at path. It first takes a lock on
+// path.lock, held until the listener is closed, so only one serve owns the
+// socket; holding it, any socket left at path is a stale one and is replaced.
+// Anything else at path is left alone.
 func Listen(ctx context.Context, path string) (net.Listener, error) {
-	if err := removeStale(ctx, path); err != nil {
+	unlock, err := lock(path + ".lock")
+	if errors.Is(err, errLocked) {
+		return nil, fmt.Errorf("%w: %s", ErrRunning, path)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if err := removeStale(path); err != nil {
+		unlock()
+
 		return nil, err
 	}
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "unix", path)
 	if err != nil {
+		unlock()
+
 		return nil, fmt.Errorf("control: %w", err)
 	}
 
-	return ln, nil
+	return ownedListener{Listener: ln, unlock: unlock}, nil
 }
 
-// removeStale removes path only when it is a socket nobody listens on.
-func removeStale(ctx context.Context, path string) error {
+// ownedListener releases the lock once the socket is closed and removed.
+type ownedListener struct {
+	net.Listener
+
+	unlock func()
+}
+
+func (l ownedListener) Close() error {
+	err := l.Listener.Close()
+	l.unlock()
+
+	return err //nolint:wrapcheck // the listener's own error
+}
+
+// removeStale removes a socket left at path. It is called with the lock held,
+// so no serve is listening on it.
+func removeStale(path string) error {
 	info, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -68,19 +97,6 @@ func removeStale(ctx context.Context, path string) error {
 	if info.Mode().IsRegular() || info.IsDir() {
 		return fmt.Errorf("control: %s exists and is not a socket", path)
 	}
-
-	var d net.Dialer
-	conn, err := d.DialContext(ctx, "unix", path)
-	switch {
-	case err == nil:
-		_ = conn.Close()
-
-		return fmt.Errorf("%w: %s", ErrRunning, path)
-	case !errors.Is(err, syscall.ECONNREFUSED):
-		// Canceled, timed out or denied: no proof the socket is stale.
-		return fmt.Errorf("control: probe %s: %w", path, err)
-	}
-
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("control: %w", err)
 	}

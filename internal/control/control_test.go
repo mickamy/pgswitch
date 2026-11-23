@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -116,4 +117,43 @@ func TestClientWithoutServe(t *testing.T) { //nolint:paralleltest // t.Chdir cha
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "is pgswitch serve running?")
+}
+
+func TestListenHasOneOwnerAtATime(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
+	t.Chdir(t.TempDir())
+
+	const contenders = 20
+	results := make(chan net.Listener, contenders)
+	var wg sync.WaitGroup
+	for range contenders {
+		wg.Go(func() {
+			ln, err := control.Listen(t.Context(), socket)
+			if err != nil {
+				assert.ErrorIs(t, err, control.ErrRunning)
+
+				return
+			}
+			results <- ln
+		})
+	}
+	wg.Wait()
+	close(results)
+
+	var owners []net.Listener
+	for ln := range results {
+		owners = append(owners, ln)
+	}
+	require.Len(t, owners, 1, "exactly one contender owns the socket")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- control.Serve(ctx, owners[0], func() control.Status { return control.Status{} }) }()
+	_, err := control.NewClient(socket).Status(t.Context())
+	require.NoError(t, err, "the losers left the owner's socket in place")
+	cancel()
+	require.NoError(t, <-done)
+
+	ln, err := control.Listen(t.Context(), socket)
+	require.NoError(t, err, "the socket can be owned again once released")
+	assert.NoError(t, ln.Close())
 }

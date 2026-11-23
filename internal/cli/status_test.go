@@ -122,6 +122,12 @@ func TestServeAnswersStatus(t *testing.T) { //nolint:paralleltest // t.Chdir cha
 	_, out, _ := runCLI(t, "status", "-control", socket)
 	assert.Equal(t, "no connections\n", out)
 
+	code, _, stderr := runCLI(t, "serve", "-listen", freeAddr(t), "-control", socket)
+	assert.Equal(t, exit.Error, code)
+	assert.Contains(t, stderr, "already running")
+	code, _, _ = runCLI(t, "status", "-control", socket)
+	assert.Equal(t, exit.OK, code, "the first serve still answers")
+
 	cancel()
 	assert.Equal(t, exit.OK, <-done)
 }
