@@ -27,6 +27,10 @@ pgswitch help
 pgswitch version
 ```
 
+pgswitch creates branch databases as `-admin-user` (default: your OS user), with the password from `PGPASSWORD`. That role needs to create databases and end other sessions, so a superuser is simplest. Its password must be ASCII: pgswitch does not apply SASLprep, so SCRAM authentication fails for passwords that SASLprep would change.
+
+PostgreSQL 15 or later is required.
+
 ## Development
 
 ```sh
