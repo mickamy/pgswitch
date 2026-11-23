@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/mickamy/pgswitch/internal/control"
+	"github.com/mickamy/pgswitch/internal/events"
 )
 
 // Socket paths are short-lived and length-limited (104 bytes on macOS), so
@@ -22,12 +23,18 @@ const socket = "pgswitch.sock"
 func serve(t *testing.T, status func() control.Status) context.CancelFunc {
 	t.Helper()
 
+	return serveSource(t, control.Source{Status: status, Events: events.New()})
+}
+
+func serveSource(t *testing.T, src control.Source) context.CancelFunc {
+	t.Helper()
+
 	ln, err := control.Listen(t.Context(), socket)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
-	go func() { done <- control.Serve(ctx, ln, status) }()
+	go func() { done <- control.Serve(ctx, ln, src) }()
 	t.Cleanup(func() {
 		cancel()
 		assert.NoError(t, <-done)
@@ -148,7 +155,8 @@ func TestListenHasOneOwnerAtATime(t *testing.T) { //nolint:paralleltest // t.Chd
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
-	go func() { done <- control.Serve(ctx, owners[0], func() control.Status { return control.Status{} }) }()
+	src := control.Source{Status: func() control.Status { return control.Status{} }, Events: events.New()}
+	go func() { done <- control.Serve(ctx, owners[0], src) }()
 	_, err := control.NewClient(socket).Status(t.Context())
 	require.NoError(t, err, "the losers left the owner's socket in place")
 	cancel()
@@ -205,4 +213,48 @@ func TestListenLeavesASymlink(t *testing.T) { //nolint:paralleltest // t.Chdir c
 	info, err := os.Lstat(socket)
 	require.NoError(t, err)
 	assert.NotZero(t, info.Mode()&os.ModeSymlink, "the symlink is still there")
+}
+
+func TestLog(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
+	t.Chdir(t.TempDir())
+	log := events.New()
+	log.Add(events.Event{Message: "routed", Attrs: map[string]string{"database": "shop_test"}})
+	serveSource(t, control.Source{Status: func() control.Status { return control.Status{} }, Events: log})
+
+	var got []events.Event
+	require.NoError(t, control.NewClient(socket).Log(t.Context(), false, func(e events.Event) { got = append(got, e) }))
+
+	assert.Equal(t, []events.Event{{Message: "routed", Attrs: map[string]string{"database": "shop_test"}}}, got)
+}
+
+func TestLogFollow(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
+	t.Chdir(t.TempDir())
+	log := events.New()
+	log.Add(events.Event{Message: "before"})
+	stop := serveSource(t, control.Source{Status: func() control.Status { return control.Status{} }, Events: log})
+
+	got := make(chan string, 8)
+	done := make(chan error, 1)
+	go func() {
+		done <- control.NewClient(socket).Log(t.Context(), true, func(e events.Event) { got <- e.Message })
+	}()
+
+	assert.Equal(t, "before", <-got)
+	require.Eventually(t, func() bool {
+		log.Add(events.Event{Message: "after"})
+		select {
+		case m := <-got:
+			return m == "after"
+		case <-time.After(20 * time.Millisecond):
+			return false
+		}
+	}, 5*time.Second, 10*time.Millisecond)
+
+	stop()
+	select {
+	case err := <-done:
+		require.NoError(t, err, "following ends when serve stops")
+	case <-time.After(5 * time.Second):
+		require.FailNow(t, "following did not end with serve")
+	}
 }

@@ -34,6 +34,12 @@ var commands = []command{
 		usage:   printServeUsage,
 	},
 	{
+		name:    "log",
+		summary: "Show routing, clone and switch events",
+		run:     runLog,
+		usage:   printLogUsage,
+	},
+	{
 		name:    "status",
 		summary: "Show live connections and where they were routed",
 		run:     runStatus,
