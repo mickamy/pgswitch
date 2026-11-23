@@ -209,3 +209,36 @@ func TestReftable(t *testing.T) {
 	_, err = wt.DefaultBranch()
 	assert.ErrorIs(t, err, git.ErrReftable)
 }
+
+func TestWorktrees(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t, "main")
+	fixTax := repo + "-fix-tax"
+	gone := repo + "-gone"
+	runGit(t, repo, "worktree", "add", "-q", "-b", "fix-tax", fixTax)
+	runGit(t, repo, "worktree", "add", "-q", "-b", "gone", gone)
+	t.Cleanup(func() { _ = os.RemoveAll(fixTax) })
+	require.NoError(t, os.RemoveAll(gone)) // without git worktree prune
+
+	commonDir := filepath.Join(repo, ".git")
+	got, err := git.Worktrees(commonDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, []git.Worktree{
+		{Root: repo, GitDir: commonDir, CommonDir: commonDir},
+		{Root: fixTax, GitDir: filepath.Join(commonDir, "worktrees", filepath.Base(fixTax)), CommonDir: commonDir},
+	}, got)
+}
+
+func TestWorktreesWithoutLinked(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t, "main")
+	commonDir := filepath.Join(repo, ".git")
+
+	got, err := git.Worktrees(commonDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, []git.Worktree{{Root: repo, GitDir: commonDir, CommonDir: commonDir}}, got)
+}

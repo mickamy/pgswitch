@@ -83,6 +83,39 @@ func open(root string) (Worktree, error) {
 	return Worktree{Root: root, GitDir: gitDir, CommonDir: commonDir}, nil
 }
 
+// Worktrees lists the checkouts of the repository at commonDir: the main one,
+// unless the repository is bare, and every linked one whose directory still
+// exists.
+func Worktrees(commonDir string) ([]Worktree, error) {
+	var wts []Worktree
+	if filepath.Base(commonDir) == ".git" {
+		wts = append(wts, Worktree{Root: filepath.Dir(commonDir), GitDir: commonDir, CommonDir: commonDir})
+	}
+
+	entries, err := os.ReadDir(filepath.Join(commonDir, "worktrees"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return wts, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("git: %w", err)
+	}
+
+	for _, e := range entries {
+		gitDir := filepath.Join(commonDir, "worktrees", e.Name())
+		dotGit, err := readTrimmed(filepath.Join(gitDir, "gitdir"))
+		if err != nil {
+			continue // being created or removed
+		}
+		dotGit = resolve(gitDir, dotGit)
+		if _, err := os.Stat(dotGit); err != nil {
+			continue // removed without git worktree prune
+		}
+		wts = append(wts, Worktree{Root: filepath.Dir(dotGit), GitDir: gitDir, CommonDir: commonDir})
+	}
+
+	return wts, nil
+}
+
 // readGitdirFile reads the .git file of a linked worktree or submodule.
 func readGitdirFile(path string) (string, error) {
 	content, err := readTrimmed(path)
