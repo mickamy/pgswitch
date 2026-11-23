@@ -47,7 +47,12 @@ func runServe(ctx context.Context, args []string, std IO) int {
 	if *debug {
 		level = slog.LevelDebug
 	}
-	logger := slog.New(slog.NewTextHandler(std.Err, &slog.HandlerOptions{Level: level}))
+	// What serve logs is also kept for pgswitch log.
+	recent := events.New()
+	logger := slog.New(slog.NewMultiHandler(
+		slog.NewTextHandler(std.Err, &slog.HandlerOptions{Level: level}),
+		events.NewHandler(recent),
+	))
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", *listen)
@@ -74,7 +79,7 @@ func runServe(ctx context.Context, args []string, std IO) int {
 	go w.Run(ctx)
 
 	if *controlPath != "" {
-		if err := serveControl(ctx, *controlPath, p, events.New(), logger); err != nil {
+		if err := serveControl(ctx, *controlPath, p, recent, logger); err != nil {
 			return fail(std, err)
 		}
 	}
