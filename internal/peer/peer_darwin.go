@@ -13,11 +13,12 @@ import (
 const lsofNoMatch = 1
 
 func lookup(ctx context.Context, client, server netip.AddrPort) (Process, error) {
-	out, err := runLsof(ctx, "-nP", "-iTCP@"+client.String(), "-sTCP:ESTABLISHED", "-Fpn")
+	// +c 0 keeps command names whole instead of cutting them at 9 characters.
+	out, err := runLsof(ctx, "-nP", "+c", "0", "-iTCP@"+client.String(), "-sTCP:ESTABLISHED", "-Fpcn")
 	if err != nil {
 		return Process{}, err
 	}
-	pid, ok := pidFromLsof(out, client.String(), server.String())
+	pid, command, ok := processFromLsof(out, client.String(), server.String())
 	if !ok {
 		return Process{}, ErrNotFound
 	}
@@ -31,7 +32,7 @@ func lookup(ctx context.Context, client, server netip.AddrPort) (Process, error)
 		return Process{}, fmt.Errorf("peer: no cwd for pid %d", pid)
 	}
 
-	return Process{PID: pid, Cwd: cwd}, nil
+	return Process{PID: pid, Command: command, Cwd: cwd}, nil
 }
 
 func runLsof(ctx context.Context, args ...string) ([]byte, error) {

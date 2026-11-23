@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 const procRoot = "/proc"
@@ -21,12 +22,17 @@ func lookup(ctx context.Context, client, server netip.AddrPort) (Process, error)
 		return Process{}, err
 	}
 
-	cwd, err := os.Readlink(filepath.Join(procRoot, strconv.Itoa(pid), "cwd"))
+	dir := filepath.Join(procRoot, strconv.Itoa(pid))
+	cwd, err := os.Readlink(filepath.Join(dir, "cwd"))
+	if err != nil {
+		return Process{}, fmt.Errorf("peer: %w", err)
+	}
+	comm, err := os.ReadFile(filepath.Join(dir, "comm"))
 	if err != nil {
 		return Process{}, fmt.Errorf("peer: %w", err)
 	}
 
-	return Process{PID: pid, Cwd: cwd}, nil
+	return Process{PID: pid, Command: strings.TrimSpace(string(comm)), Cwd: cwd}, nil
 }
 
 // socketInode searches both tables: a dual-stack socket connecting over IPv4

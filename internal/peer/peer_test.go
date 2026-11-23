@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -43,7 +44,11 @@ func TestLookup(t *testing.T) {
 	wd, err = filepath.EvalSymlinks(wd)
 	require.NoError(t, err)
 
-	assert.Equal(t, peer.Process{PID: os.Getpid(), Cwd: wd}, got)
+	assert.Equal(t, os.Getpid(), got.PID)
+	assert.Equal(t, wd, got.Cwd)
+	assert.NotEmpty(t, got.Command)
+	assert.True(t, strings.HasPrefix(filepath.Base(os.Args[0]), got.Command),
+		"%q is not a prefix of %q", got.Command, filepath.Base(os.Args[0]))
 }
 
 func TestLookupNotFound(t *testing.T) {
@@ -57,36 +62,47 @@ func TestLookupNotFound(t *testing.T) {
 	assert.ErrorIs(t, err, peer.ErrNotFound)
 }
 
-func TestPIDFromLsof(t *testing.T) {
+func TestProcessFromLsof(t *testing.T) {
 	t.Parallel()
 
 	// The proxy is pid 100 and the client pid 300. Pid 200, listed first, reuses
 	// the client's source address for another destination.
-	const out = "p100\nf7\nn127.0.0.1:6432->127.0.0.1:50274\n" +
-		"p200\nf5\nn127.0.0.1:50274->127.0.0.1:7000\n" +
-		"p300\nf9\nn127.0.0.1:50274->127.0.0.1:6432\n"
+	const out = "p100\ncpgswitch\nf7\nn127.0.0.1:6432->127.0.0.1:50274\n" +
+		"p200\ncpsql\nf5\nn127.0.0.1:50274->127.0.0.1:7000\n" +
+		"p300\ncruby\nf9\nn127.0.0.1:50274->127.0.0.1:6432\n"
 
 	tests := map[string]struct {
-		client  string
-		server  string
-		wantPID int
-		wantOK  bool
+		client      string
+		server      string
+		wantPID     int
+		wantCommand string
+		wantOK      bool
 	}{
-		"client end":            {client: "127.0.0.1:50274", server: "127.0.0.1:6432", wantPID: 300, wantOK: true},
-		"same source elsewhere": {client: "127.0.0.1:50274", server: "127.0.0.1:7000", wantPID: 200, wantOK: true},
-		"server end":            {client: "127.0.0.1:6432", server: "127.0.0.1:50274", wantPID: 100, wantOK: true},
-		"other destination":     {client: "127.0.0.1:50274", server: "127.0.0.1:6433", wantOK: false},
-		"ipv6 client":           {client: "[::1]:50274", server: "[::1]:6432", wantOK: false},
+		"client end": {
+			client: "127.0.0.1:50274", server: "127.0.0.1:6432",
+			wantPID: 300, wantCommand: "ruby", wantOK: true,
+		},
+		"same source elsewhere": {
+			client: "127.0.0.1:50274", server: "127.0.0.1:7000",
+			wantPID: 200, wantCommand: "psql", wantOK: true,
+		},
+		"server end": {
+			client: "127.0.0.1:6432", server: "127.0.0.1:50274",
+			wantPID: 100, wantCommand: "pgswitch", wantOK: true,
+		},
+		"other destination": {client: "127.0.0.1:50274", server: "127.0.0.1:6433", wantOK: false},
+		"ipv6 client":       {client: "[::1]:50274", server: "[::1]:6432", wantOK: false},
 	}
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			pid, ok := peer.PIDFromLsof([]byte(out), tt.client, tt.server)
+			pid, command, ok := peer.ProcessFromLsof([]byte(out), tt.client, tt.server)
 
 			assert.Equal(t, tt.wantOK, ok)
 			assert.Equal(t, tt.wantPID, pid)
+			assert.Equal(t, tt.wantCommand, command)
 		})
 	}
 }
