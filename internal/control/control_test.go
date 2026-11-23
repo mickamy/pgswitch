@@ -157,3 +157,19 @@ func TestListenHasOneOwnerAtATime(t *testing.T) { //nolint:paralleltest // t.Chd
 	require.NoError(t, err, "the socket can be owned again once released")
 	assert.NoError(t, ln.Close())
 }
+
+func TestReclosingKeepsTheNewOwner(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
+	t.Chdir(t.TempDir())
+
+	old, err := control.Listen(t.Context(), socket)
+	require.NoError(t, err)
+	require.NoError(t, old.Close())
+	current, err := control.Listen(t.Context(), socket)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = current.Close() })
+
+	_ = old.Close() // may close a descriptor now reused by current's lock
+
+	_, err = control.Listen(t.Context(), socket)
+	assert.ErrorIs(t, err, control.ErrRunning)
+}

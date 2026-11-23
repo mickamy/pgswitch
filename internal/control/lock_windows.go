@@ -3,13 +3,15 @@ package control
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"syscall"
 )
 
 const errSharingViolation syscall.Errno = 32
 
 // lock opens path without sharing, which Windows refuses to anyone else until
-// the handle is closed or the process ends.
+// the handle is closed or the process ends. The returned func closes the
+// handle once, however often it is called.
 func lock(path string) (func(), error) {
 	name, err := syscall.UTF16PtrFromString(path)
 	if err != nil {
@@ -24,5 +26,5 @@ func lock(path string) (func(), error) {
 		return nil, fmt.Errorf("control: lock %s: %w", path, err)
 	}
 
-	return func() { _ = syscall.CloseHandle(h) }, nil
+	return sync.OnceFunc(func() { _ = syscall.CloseHandle(h) }), nil
 }

@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"syscall"
 )
 
 // lock takes an exclusive lock on path that the OS drops when the process
-// ends, however it ends.
+// ends, however it ends. The returned func releases it once, however often it
+// is called: the descriptor may be reused afterwards for someone else's lock.
 func lock(path string) (func(), error) {
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
@@ -26,8 +28,8 @@ func lock(path string) (func(), error) {
 		return nil, fmt.Errorf("control: lock %s: %w", path, err)
 	}
 
-	return func() {
+	return sync.OnceFunc(func() {
 		_ = syscall.Flock(fd, syscall.LOCK_UN)
 		_ = f.Close()
-	}, nil
+	}), nil
 }
