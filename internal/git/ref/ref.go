@@ -167,3 +167,41 @@ func CreatedFrom(commonDir, branch string) (Creation, bool, error) {
 
 	return Creation{From: from, Commit: fields[1], At: time.Unix(unix, 0)}, true, nil
 }
+
+const renamedPrefix = "Branch: renamed "
+
+// RenamedFrom reports the name branch had before git branch -m, when its
+// latest reflog entry is that rename.
+func RenamedFrom(commonDir, branch string) (string, bool, error) {
+	f, err := os.Open(filepath.Join(commonDir, "logs", filepath.FromSlash(Heads(branch))))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("ref: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	var last string
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		last = sc.Text()
+	}
+	if err := sc.Err(); err != nil {
+		return "", false, fmt.Errorf("ref: %w", err)
+	}
+
+	// ...\tBranch: renamed refs/heads/<old> to refs/heads/<new>
+	_, message, _ := strings.Cut(last, "\t")
+	rename, ok := strings.CutPrefix(message, renamedPrefix)
+	if !ok {
+		return "", false, nil
+	}
+	oldRef, newRef, ok := strings.Cut(rename, " to ")
+	old, isBranch := Branch(oldRef)
+	if !ok || !isBranch || newRef != Heads(branch) {
+		return "", false, nil
+	}
+
+	return old, true, nil
+}

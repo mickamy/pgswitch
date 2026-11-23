@@ -190,3 +190,40 @@ func TestCreatedFrom(t *testing.T) {
 		})
 	}
 }
+
+func TestRenamedFrom(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t)
+	commonDir := filepath.Join(repo, ".git")
+	runGit(t, repo, "switch", "-q", "-c", "feature/old")
+	runGit(t, repo, "branch", "-m", "feature/new")
+	runGit(t, repo, "branch", "-m", "main", "trunk")
+	runGit(t, repo, "branch", "-m", "trunk", "main")
+	runGit(t, repo, "switch", "-q", "-c", "renamed-then-committed")
+	runGit(t, repo, "branch", "-m", "renamed-then-committed", "committed")
+	runGit(t, repo, "commit", "-q", "--allow-empty", "-m", "after the rename")
+
+	tests := map[string]struct {
+		branch  string
+		wantOld string
+		wantOK  bool
+	}{
+		"renamed":                  {branch: "feature/new", wantOld: "feature/old", wantOK: true},
+		"renamed back":             {branch: "main", wantOld: "trunk", wantOK: true},
+		"committed after a rename": {branch: "committed", wantOK: false},
+		"never renamed":            {branch: "feature/coupons-missing", wantOK: false},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			old, ok, err := ref.RenamedFrom(commonDir, tt.branch)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.wantOK, ok)
+			assert.Equal(t, tt.wantOld, old)
+		})
+	}
+}
