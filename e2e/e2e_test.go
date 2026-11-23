@@ -347,3 +347,40 @@ func TestProxyFollowsBranchRename(t *testing.T) { //nolint:paralleltest // t.Chd
 	assert.Equal(t, "WRITTEN_BEFORE", queryValue(t, after, "select code from coupons"))
 	assert.Equal(t, "0", queryValue(t, admin, "select count(*) from pg_database where datname = '"+oldDB+"'"))
 }
+
+// TestProxyRenamesOnAnImmediateReconnect connects right after git branch -m,
+// racing the watcher: either way the data written before the rename is there.
+func TestProxyRenamesOnAnImmediateReconnect(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
+	cfg := adminConfig(t)
+	admin := connect(t, cfg)
+
+	repo, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	runGit(t, repo, "init", "-q", "-b", "main")
+	runGit(t, repo, "commit", "-q", "--allow-empty", "-m", "init")
+	runGit(t, repo, "switch", "-q", "-c", "feature/old")
+
+	db := uniqueName("pgswitch_e2e")
+	oldDB := route.PhysicalName(db, "feature/old", "main")
+	newDB := route.PhysicalName(db, "feature/new", "main")
+	createDatabase(t, admin, db)
+	dropOnCleanup(t, admin, oldDB)
+	dropOnCleanup(t, admin, newDB)
+
+	addr := startProxy(t, cfg)
+	t.Chdir(repo)
+
+	viaProxy := cfg
+	viaProxy.Addr = addr
+	viaProxy.Database = db
+	before := connect(t, viaProxy)
+	require.NoError(t, before.Exec(t.Context(), "create table coupons (code text)"))
+	require.NoError(t, before.Exec(t.Context(), "insert into coupons values ('WRITTEN_BEFORE')"))
+	require.NoError(t, before.Close())
+
+	runGit(t, repo, "branch", "-m", "feature/new")
+	after := connect(t, viaProxy)
+
+	assert.Equal(t, newDB, queryValue(t, after, "select current_database()"))
+	assert.Equal(t, "WRITTEN_BEFORE", queryValue(t, after, "select code from coupons"))
+}

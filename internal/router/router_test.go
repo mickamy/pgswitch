@@ -36,6 +36,7 @@ type fakeCloner struct {
 	ensured []string
 	renamed []string
 	waited  []string
+	calls   []string // "ensure" and "rename", in order
 	err     error
 }
 
@@ -46,6 +47,7 @@ func (c *fakeCloner) Ensure(_ context.Context, target string, sources ...string)
 	defer c.mu.Unlock()
 
 	c.ensured = append(c.ensured, strings.Join(sources, ",")+"->"+target)
+	c.calls = append(c.calls, "ensure")
 
 	return c.err
 }
@@ -55,6 +57,7 @@ func (c *fakeCloner) Rename(_ context.Context, from, to string) error {
 	defer c.mu.Unlock()
 
 	c.renamed = append(c.renamed, from+"->"+to)
+	c.calls = append(c.calls, "rename")
 
 	return nil
 }
@@ -589,4 +592,25 @@ func TestSwitchedFollowsABranchRename(t *testing.T) {
 			assert.Equal(t, tt.wantRenamed, cloner.renamed)
 		})
 	}
+}
+
+// TestRouteRenamesBeforeTheWatcherDoes connects right after git branch -m,
+// before the watcher reports it: the database is renamed, not cloned anew.
+func TestRouteRenamesBeforeTheWatcherDoes(t *testing.T) {
+	t.Parallel()
+
+	db := func(branch string) string { return route.PhysicalName(database, branch, "main") }
+
+	repo := newRepo(t)
+	runGit(t, repo, "switch", "-q", "-c", "feature/old")
+	runGit(t, repo, "branch", "-m", "feature/new")
+	cloner := &fakeCloner{}
+	r := router.NewWithLookup(slog.New(slog.DiscardHandler), cloner, &fakeWatcher{}, lookupAt(repo))
+
+	got, err := r.Route(t.Context(), client, server, database)
+	require.NoError(t, err)
+
+	assert.Equal(t, db("feature/new"), got.Database)
+	assert.Equal(t, []string{db("feature/old") + "->" + db("feature/new")}, cloner.renamed)
+	assert.Equal(t, []string{"rename", "ensure"}, cloner.calls)
 }

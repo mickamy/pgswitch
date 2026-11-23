@@ -91,6 +91,9 @@ type attribution struct {
 	owner    string
 	// sources are the databases to clone physical from, best first.
 	sources []string
+	// renamedFrom is the database physical had before a branch rename the
+	// watcher may not have reported yet.
+	renamedFrom string
 }
 
 // Route clones a branch database on first use from the database of the
@@ -103,6 +106,12 @@ func (r Router) Route(ctx context.Context, client, server net.Addr, database str
 	}
 
 	a := r.resolve(ctx, client, server, database)
+	if a.renamedFrom != "" {
+		// The same flight as the watcher's, whichever comes first.
+		if err := r.cloner.Rename(ctx, a.renamedFrom, a.physical); err != nil {
+			r.logger.Warn("follow branch rename", "database", database, "err", err)
+		}
+	}
 	if a.physical != database {
 		err := r.cloner.Ensure(ctx, a.physical, a.sources...)
 		switch {
@@ -175,7 +184,9 @@ func (r Router) resolve(ctx context.Context, client, server net.Addr, database s
 
 	physical := route.PhysicalName(database, branch, defaultBranch)
 	var sources []string
+	var renamedFrom string
 	if physical != database {
+		renamedFrom = r.recentlyRenamedFrom(wt.CommonDir, database, branch, defaultBranch)
 		parents := r.parentBranches(wt, branch, defaultBranch)
 		for _, p := range parents {
 			sources = append(sources, route.PhysicalName(database, p, defaultBranch))
@@ -187,7 +198,7 @@ func (r Router) resolve(ctx context.Context, client, server net.Addr, database s
 	}
 	logger.Debug("attributed", "worktree", wt.Root, "branch", branch, "physical", physical)
 
-	return attribution{physical: physical, owner: wt.Root, sources: sources}
+	return attribution{physical: physical, owner: wt.Root, sources: sources, renamedFrom: renamedFrom}
 }
 
 // followRename moves each database the repository's connections used from
@@ -216,4 +227,16 @@ func (r Router) followRename(ctx context.Context, commonDir, from, to string) {
 			logger.Warn("follow branch rename", "database", db, "err", err)
 		}
 	}
+}
+
+// recentlyRenamedFrom returns the database branch's database had before a
+// rename of branch just now, or "" when there was none or it involved the
+// default branch.
+func (r Router) recentlyRenamedFrom(commonDir, database, branch, defaultBranch string) string {
+	rename, ok, err := ref.RenamedFrom(commonDir, branch)
+	if err != nil || !ok || time.Since(rename.At) > recentWindow || rename.From == defaultBranch {
+		return ""
+	}
+
+	return route.PhysicalName(database, rename.From, defaultBranch)
 }
