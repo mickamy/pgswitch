@@ -63,6 +63,12 @@ func createDatabase(t *testing.T, admin pgadmin.Conn, name string) {
 	t.Helper()
 
 	require.NoError(t, admin.Exec(t.Context(), `create database "`+name+`"`))
+	dropOnCleanup(t, admin, name)
+}
+
+func dropOnCleanup(t *testing.T, admin pgadmin.Conn, name string) {
+	t.Helper()
+
 	t.Cleanup(func() {
 		// t.Context is already canceled during cleanup.
 		_ = admin.Exec(context.WithoutCancel(t.Context()), `drop database if exists "`+name+`" with (force)`)
