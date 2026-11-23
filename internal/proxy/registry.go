@@ -2,52 +2,56 @@ package proxy
 
 import (
 	"net"
+	"slices"
 	"sync"
+	"time"
 )
 
-// registry tracks the client connections of each owner.
+// Conn describes a client connection the proxy is relaying.
+type Conn struct {
+	Route
+
+	Client    string
+	Requested string
+	Since     time.Time
+}
+
+// registry tracks the client connections being relayed.
 type registry struct {
-	mu      sync.Mutex
-	byOwner map[string]map[net.Conn]struct{}
+	mu    sync.Mutex
+	conns map[net.Conn]Conn
 }
 
 func newRegistry() *registry {
-	return &registry{byOwner: make(map[string]map[net.Conn]struct{})}
+	return &registry{conns: make(map[net.Conn]Conn)}
 }
 
-// add records conn under owner until the returned func runs.
-func (r *registry) add(owner string, conn net.Conn) func() {
+// add records conn until the returned func runs.
+func (r *registry) add(conn net.Conn, info Conn) func() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	conns, ok := r.byOwner[owner]
-	if !ok {
-		conns = make(map[net.Conn]struct{})
-		r.byOwner[owner] = conns
-	}
-	conns[conn] = struct{}{}
+	r.conns[conn] = info
 
 	return func() {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 
-		// Already gone if closeAll took this owner's connections.
-		if conns, ok := r.byOwner[owner]; ok {
-			delete(conns, conn)
-			if len(conns) == 0 {
-				delete(r.byOwner, owner)
-			}
-		}
+		delete(r.conns, conn)
 	}
 }
 
+// closeAll closes owner's connections and forgets them at once, so they are
+// counted and listed only once.
 func (r *registry) closeAll(owner string) int {
 	r.mu.Lock()
-	conns := make([]net.Conn, 0, len(r.byOwner[owner]))
-	for conn := range r.byOwner[owner] {
-		conns = append(conns, conn)
+	var conns []net.Conn
+	for conn, info := range r.conns {
+		if info.Owner == owner {
+			conns = append(conns, conn)
+			delete(r.conns, conn)
+		}
 	}
-	delete(r.byOwner, owner)
 	r.mu.Unlock()
 
 	for _, conn := range conns {
@@ -55,4 +59,18 @@ func (r *registry) closeAll(owner string) int {
 	}
 
 	return len(conns)
+}
+
+// list returns the connections, oldest first.
+func (r *registry) list() []Conn {
+	r.mu.Lock()
+	conns := make([]Conn, 0, len(r.conns))
+	for _, info := range r.conns {
+		conns = append(conns, info)
+	}
+	r.mu.Unlock()
+
+	slices.SortFunc(conns, func(a, b Conn) int { return a.Since.Compare(b.Since) })
+
+	return conns
 }

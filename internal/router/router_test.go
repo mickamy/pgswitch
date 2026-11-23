@@ -188,7 +188,8 @@ func TestRoute(t *testing.T) {
 			got, err := r.Route(t.Context(), client, server, database)
 			require.NoError(t, err)
 
-			assert.Equal(t, proxy.Route{Database: tt.want, Owner: owner}, got)
+			assert.Equal(t, tt.want, got.Database)
+			assert.Equal(t, owner, got.Owner)
 		})
 	}
 }
@@ -613,4 +614,29 @@ func TestRouteRenamesBeforeTheWatcherDoes(t *testing.T) {
 	assert.Equal(t, db("feature/new"), got.Database)
 	assert.Equal(t, []string{db("feature/old") + "->" + db("feature/new")}, cloner.renamed)
 	assert.Equal(t, []string{"rename", "ensure"}, cloner.calls)
+}
+
+func TestRouteDescribesTheConnection(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t)
+	linked := repo + "-fix-tax"
+	runGit(t, repo, "worktree", "add", "-q", "-b", "fix-tax", linked)
+	t.Cleanup(func() { _ = os.RemoveAll(linked) })
+	r := router.NewWithLookup(slog.New(slog.DiscardHandler), &fakeCloner{}, &fakeWatcher{},
+		func(context.Context, netip.AddrPort, netip.AddrPort) (peer.Process, error) {
+			return peer.Process{PID: 48211, Command: "ruby", Cwd: linked}, nil
+		})
+
+	got, err := r.Route(t.Context(), client, server, database)
+	require.NoError(t, err)
+
+	assert.Equal(t, proxy.Route{
+		Database: route.PhysicalName(database, "fix-tax", "main"),
+		Owner:    linked,
+		Repo:     filepath.Base(repo),
+		Branch:   "fix-tax",
+		PID:      48211,
+		Command:  "ruby",
+	}, got)
 }

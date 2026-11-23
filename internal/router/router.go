@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"path/filepath"
 	"slices"
 	"time"
 
@@ -87,12 +88,11 @@ func (r Router) Switched(ctx context.Context, commonDir, from, to string) {
 
 // attribution is what resolve learned about a connection.
 type attribution struct {
-	physical string
-	owner    string
-	// sources are the databases to clone physical from, best first.
+	route proxy.Route
+	// sources are the databases to clone route.Database from, best first.
 	sources []string
-	// renamedFrom is the database physical had before a branch rename the
-	// watcher may not have reported yet.
+	// renamedFrom is the database route.Database had before a branch rename
+	// the watcher may not have reported yet.
 	renamedFrom string
 }
 
@@ -106,86 +106,92 @@ func (r Router) Route(ctx context.Context, client, server net.Addr, database str
 	}
 
 	a := r.resolve(ctx, client, server, database)
+	physical := a.route.Database
 	if a.renamedFrom != "" {
 		// The same flight as the watcher's, whichever comes first.
-		if err := r.cloner.Rename(ctx, a.renamedFrom, a.physical); err != nil {
+		if err := r.cloner.Rename(ctx, a.renamedFrom, physical); err != nil {
 			r.logger.Warn("follow branch rename", "database", database, "err", err)
 		}
 	}
-	if a.physical != database {
-		err := r.cloner.Ensure(ctx, a.physical, a.sources...)
+	if physical != database {
+		err := r.cloner.Ensure(ctx, physical, a.sources...)
 		switch {
 		case errors.Is(err, clone.ErrSourceMissing):
-			r.logger.Warn("nothing to clone from", "database", database, "physical", a.physical)
+			r.logger.Warn("nothing to clone from", "database", database, "physical", physical)
 		case err != nil:
 			return proxy.Route{}, fmt.Errorf("router: %w", err)
 		}
 	}
 
-	if err := r.cloner.Wait(ctx, a.physical); err != nil {
+	if err := r.cloner.Wait(ctx, physical); err != nil {
 		return proxy.Route{}, fmt.Errorf("router: %w", err)
 	}
 
-	return proxy.Route{Database: a.physical, Owner: a.owner}, nil
+	return a.route, nil
 }
 
 // resolve picks the physical database and, when the connection comes from a
-// worktree, that worktree's root. A connection it cannot attribute to a
-// branch goes to the default branch, which keeps the requested name.
+// worktree, that worktree's root as the owner, with what it learned on the way
+// for status. A connection it cannot attribute to a branch goes to the default
+// branch, which keeps the requested name.
 func (r Router) resolve(ctx context.Context, client, server net.Addr, database string) attribution {
 	logger := r.logger.With("client", client.String(), "database", database)
+	rt := proxy.Route{Database: database}
 
 	clientTCP, okClient := client.(*net.TCPAddr)
 	serverTCP, okServer := server.(*net.TCPAddr)
 	if !okClient || !okServer {
 		logger.Warn("unattributed connection", "reason", "not a TCP connection")
 
-		return attribution{physical: database}
+		return attribution{route: rt}
 	}
 	proc, err := r.lookup(ctx, clientTCP.AddrPort(), serverTCP.AddrPort())
 	if err != nil {
 		logger.Warn("unattributed connection", "err", err)
 
-		return attribution{physical: database}
+		return attribution{route: rt}
 	}
+	rt.PID, rt.Command = proc.PID, proc.Command
 	logger = logger.With("pid", proc.PID, "cwd", proc.Cwd)
 
 	wt, err := git.Find(proc.Cwd)
 	if errors.Is(err, git.ErrNotRepository) {
 		logger.Debug("outside any repository; passing through")
 
-		return attribution{physical: database}
+		return attribution{route: rt}
 	}
 	if err != nil {
 		logger.Warn("unattributed connection", "err", err)
 
-		return attribution{physical: database}
+		return attribution{route: rt}
 	}
 	r.watcher.Add(wt.CommonDir)
 	r.databases.add(wt.CommonDir, database)
+	rt.Owner, rt.Repo = wt.Root, repoName(wt.CommonDir)
 
 	branch, ok, err := wt.Branch()
 	if err != nil {
 		logger.Warn("unattributed connection", "worktree", wt.Root, "err", err)
 
-		return attribution{physical: database, owner: wt.Root}
+		return attribution{route: rt}
 	}
 	if !ok {
 		logger.Warn("unattributed connection", "worktree", wt.Root, "reason", "detached HEAD")
 
-		return attribution{physical: database, owner: wt.Root}
+		return attribution{route: rt}
 	}
+	rt.Branch = branch
 	defaultBranch, err := wt.DefaultBranch()
 	if err != nil {
 		logger.Warn("unattributed connection", "worktree", wt.Root, "err", err)
 
-		return attribution{physical: database, owner: wt.Root}
+		return attribution{route: rt}
 	}
 
-	physical := route.PhysicalName(database, branch, defaultBranch)
+	rt.Database = route.PhysicalName(database, branch, defaultBranch)
 	var sources []string
 	var renamedFrom string
-	if physical != database {
+	if rt.Database != database {
 		renamedFrom = r.recentlyRenamedFrom(wt.CommonDir, database, branch, defaultBranch)
 		parents := r.parentBranches(wt, branch, defaultBranch)
 		for _, p := range parents {
@@ -196,9 +202,9 @@ func (r Router) resolve(ctx context.Context, client, server net.Addr, database s
 		}
 		logger = logger.With("parents", parents)
 	}
-	logger.Debug("attributed", "worktree", wt.Root, "branch", branch, "physical", physical)
+	logger.Debug("attributed", "worktree", wt.Root, "branch", branch, "physical", rt.Database)
 
-	return attribution{physical: physical, owner: wt.Root, sources: sources, renamedFrom: renamedFrom}
+	return attribution{route: rt, sources: sources, renamedFrom: renamedFrom}
 }
 
 // followRename moves each database the repository's connections used from
@@ -239,4 +245,14 @@ func (r Router) recentlyRenamedFrom(commonDir, database, branch, defaultBranch s
 	}
 
 	return route.PhysicalName(database, rename.From, defaultBranch)
+}
+
+// repoName names a repository by its main worktree's directory, or by its git
+// directory when it is bare.
+func repoName(commonDir string) string {
+	if filepath.Base(commonDir) == ".git" {
+		return filepath.Base(filepath.Dir(commonDir))
+	}
+
+	return filepath.Base(commonDir)
 }

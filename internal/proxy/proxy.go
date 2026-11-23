@@ -26,6 +26,13 @@ var errTooManyNegotiations = errors.New("too many SSL/GSS negotiation requests")
 type Route struct {
 	Database string
 	Owner    string
+
+	// What the connection was attributed to, for status. The proxy does not
+	// use them.
+	Repo    string
+	Branch  string
+	PID     int
+	Command string
 }
 
 // Router picks the route for a connection. client and server are the two ends
@@ -53,9 +60,18 @@ func New(upstream string, router Router, logger *slog.Logger) Proxy {
 	return Proxy{upstream: upstream, router: router, logger: logger, conns: newRegistry()}
 }
 
+// Conns lists the connections being relayed, oldest first.
+func (p Proxy) Conns() []Conn {
+	return p.conns.list()
+}
+
 // Sever closes every connection routed for owner and reports how many. Pools
 // reconnect and are routed afresh.
 func (p Proxy) Sever(owner string) int {
+	if owner == "" {
+		return 0
+	}
+
 	n := p.conns.closeAll(owner)
 	if n > 0 {
 		p.logger.Info("severed connections", "owner", owner, "connections", n)
@@ -126,9 +142,12 @@ func (p Proxy) handle(ctx context.Context, client net.Conn) {
 	}
 	// Registered before the upstream connection, so a switch from here on
 	// severs it.
-	if route.Owner != "" {
-		defer p.conns.add(route.Owner, client)()
-	}
+	defer p.conns.add(client, Conn{
+		Route:     route,
+		Client:    client.RemoteAddr().String(),
+		Requested: requested,
+		Since:     time.Now(),
+	})()
 
 	var d net.Dialer
 	upstream, err := d.DialContext(ctx, "tcp", p.upstream)
