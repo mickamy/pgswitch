@@ -32,31 +32,35 @@ var (
 type lookupFunc = func(ctx context.Context, client, server netip.AddrPort) (peer.Process, error)
 
 type fakeCloner struct {
-	mu      sync.Mutex
-	ensured []string
-	renamed []string
-	waited  []string
-	calls   []string // "ensure" and "rename", in order
-	err     error
+	mu           sync.Mutex
+	ensured      []string
+	ensureLabels []clone.Label
+	renamed      []string
+	renameLabels []clone.Label
+	waited       []string
+	calls        []string // "ensure" and "rename", in order
+	err          error
 }
 
 var _ router.Cloner = (*fakeCloner)(nil)
 
-func (c *fakeCloner) Ensure(_ context.Context, target string, sources ...string) error {
+func (c *fakeCloner) Ensure(_ context.Context, target string, label clone.Label, sources ...string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.ensured = append(c.ensured, strings.Join(sources, ",")+"->"+target)
+	c.ensureLabels = append(c.ensureLabels, label)
 	c.calls = append(c.calls, "ensure")
 
 	return c.err
 }
 
-func (c *fakeCloner) Rename(_ context.Context, from, to string) error {
+func (c *fakeCloner) Rename(_ context.Context, from, to string, label clone.Label) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.renamed = append(c.renamed, from+"->"+to)
+	c.renameLabels = append(c.renameLabels, label)
 	c.calls = append(c.calls, "rename")
 
 	return nil
@@ -316,6 +320,21 @@ func TestRouteClones(t *testing.T) {
 	}
 }
 
+func TestRouteLabelsTheBranchDatabase(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t)
+	runGit(t, repo, "switch", "-q", "-c", "feature/coupons")
+	cloner := &fakeCloner{}
+
+	_, err := newRouter(cloner, lookupAt(repo)).Route(t.Context(), client, server, database)
+	require.NoError(t, err)
+
+	assert.Equal(t, []clone.Label{
+		{Repo: filepath.Join(repo, ".git"), Branch: "feature/coupons", Database: database},
+	}, cloner.ensureLabels)
+}
+
 func TestRouteWatchesTheRepository(t *testing.T) {
 	t.Parallel()
 
@@ -523,6 +542,8 @@ func TestSwitchedFollowsABranchRename(t *testing.T) {
 	tests := map[string]struct {
 		rename      func(t *testing.T, repo string) (from, to string)
 		wantRenamed []string
+		// wantLabeled are the requested databases relabeled for the new branch.
+		wantLabeled []string
 	}{
 		"git branch -m": {
 			rename: func(t *testing.T, repo string) (string, string) {
@@ -534,6 +555,7 @@ func TestSwitchedFollowsABranchRename(t *testing.T) {
 				db("shop_development", "feature/old") + "->" + db("shop_development", "feature/new"),
 				db("shop_test", "feature/old") + "->" + db("shop_test", "feature/new"),
 			},
+			wantLabeled: []string{"shop_development", "shop_test"},
 		},
 		"a commit right after the rename": {
 			rename: func(t *testing.T, repo string) (string, string) {
@@ -546,6 +568,7 @@ func TestSwitchedFollowsABranchRename(t *testing.T) {
 				db("shop_development", "feature/old") + "->" + db("shop_development", "feature/new"),
 				db("shop_test", "feature/old") + "->" + db("shop_test", "feature/new"),
 			},
+			wantLabeled: []string{"shop_development", "shop_test"},
 		},
 		"a rename long ago is not this switch": {
 			rename: func(t *testing.T, repo string) (string, string) {
@@ -591,6 +614,11 @@ func TestSwitchedFollowsABranchRename(t *testing.T) {
 			r.Switched(t.Context(), filepath.Join(repo, ".git"), from, to)
 
 			assert.Equal(t, tt.wantRenamed, cloner.renamed)
+			wantLabels := make([]clone.Label, 0, len(tt.wantLabeled))
+			for _, name := range tt.wantLabeled {
+				wantLabels = append(wantLabels, clone.Label{Repo: filepath.Join(repo, ".git"), Branch: to, Database: name})
+			}
+			assert.ElementsMatch(t, wantLabels, cloner.renameLabels)
 		})
 	}
 }
@@ -613,6 +641,9 @@ func TestRouteRenamesBeforeTheWatcherDoes(t *testing.T) {
 
 	assert.Equal(t, db("feature/new"), got.Database)
 	assert.Equal(t, []string{db("feature/old") + "->" + db("feature/new")}, cloner.renamed)
+	assert.Equal(t, []clone.Label{
+		{Repo: filepath.Join(repo, ".git"), Branch: "feature/new", Database: database},
+	}, cloner.renameLabels)
 	assert.Equal(t, []string{"rename", "ensure"}, cloner.calls)
 }
 

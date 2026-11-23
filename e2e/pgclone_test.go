@@ -12,6 +12,7 @@ import (
 
 	"github.com/mickamy/pgswitch/internal/clone"
 	"github.com/mickamy/pgswitch/internal/clone/pgclone"
+	"github.com/mickamy/pgswitch/internal/pgadmin"
 	"github.com/mickamy/pgswitch/internal/pgwire"
 )
 
@@ -32,6 +33,7 @@ func TestPGCloneCopiesData(t *testing.T) {
 	require.NoError(t, session.Exec(t.Context(), "insert into coupons values ('WELCOME')"))
 
 	a := pgclone.New(cfg)
+	label := clone.Label{Repo: "/src/shop/.git", Branch: "it's/fix-tax", Database: source}
 
 	exists, err := a.Exists(t.Context(), source)
 	require.NoError(t, err)
@@ -40,15 +42,16 @@ func TestPGCloneCopiesData(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, exists)
 
-	require.ErrorIs(t, a.Copy(t.Context(), source, target), clone.ErrSourceBusy, "a session is still on the source")
+	require.ErrorIs(t, a.Copy(t.Context(), source, target, label), clone.ErrSourceBusy,
+		"a session is still on the source")
 
 	n, err := a.Terminate(t.Context(), source)
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
 	require.Error(t, session.Exec(t.Context(), "select 1"), "the session was terminated")
 
-	require.NoError(t, a.Copy(t.Context(), source, target))
-	require.NoError(t, a.Copy(t.Context(), source, target), "an existing target is not an error")
+	require.NoError(t, a.Copy(t.Context(), source, target, label))
+	require.NoError(t, a.Copy(t.Context(), source, target, label), "an existing target is not an error")
 
 	onTarget := cfg
 	onTarget.Database = target
@@ -57,6 +60,16 @@ func TestPGCloneCopiesData(t *testing.T) {
 		queryValue(t, admin, "select pg_get_userbyid(datdba) from pg_database where datname = '"+source+"'"),
 		queryValue(t, admin, "select pg_get_userbyid(datdba) from pg_database where datname = '"+target+"'"),
 	)
+	assert.JSONEq(t,
+		`{"pgswitch":1,"repo":"/src/shop/.git","branch":"it's/fix-tax","database":"`+source+`"}`,
+		databaseComment(t, admin, target))
+}
+
+func databaseComment(t *testing.T, admin pgadmin.Conn, db string) string {
+	t.Helper()
+
+	return queryValue(t, admin, "select coalesce(shobj_description(oid, 'pg_database'), '')"+
+		" from pg_database where datname = '"+db+"'")
 }
 
 // TestPGCloneQuotesRegardlessOfStringSettings runs as a role with
@@ -131,7 +144,7 @@ func TestPGCloneKeepsDatabaseSettingsAndPrivileges(t *testing.T) {
 	require.NoError(t, seed.Exec(t.Context(), "create table app.items (name text)"))
 	require.NoError(t, seed.Close())
 
-	require.NoError(t, pgclone.New(cfg).Copy(t.Context(), source, target))
+	require.NoError(t, pgclone.New(cfg).Copy(t.Context(), source, target, clone.Label{}))
 
 	onTarget := cfg
 	onTarget.Database = target
@@ -173,12 +186,12 @@ func TestPGCloneAsNonSuperuser(t *testing.T) {
 
 	plain := source + "__plain"
 	dropOnCleanup(t, admin, plain)
-	require.NoError(t, a.Copy(t.Context(), source, plain), "a database without settings")
+	require.NoError(t, a.Copy(t.Context(), source, plain, clone.Label{}), "a database without settings")
 
 	require.NoError(t, admin.Exec(t.Context(), `alter database "`+source+`" set search_path = app, public`))
 	withSettings := source + "__settings"
 	dropOnCleanup(t, admin, withSettings)
-	require.NoError(t, a.Copy(t.Context(), source, withSettings))
+	require.NoError(t, a.Copy(t.Context(), source, withSettings, clone.Label{}))
 	onCopy := cfg
 	onCopy.Database = withSettings
 	assert.Equal(t, "app, public", queryValue(t, connect(t, onCopy), "show search_path"))
@@ -187,7 +200,7 @@ func TestPGCloneAsNonSuperuser(t *testing.T) {
 	require.NoError(t, admin.Exec(t.Context(), `alter role "`+cfg.User+`" in database "`+source+`" set work_mem = '8MB'`))
 	denied := source + "__denied"
 	dropOnCleanup(t, admin, denied)
-	err := a.Copy(t.Context(), source, denied)
+	err := a.Copy(t.Context(), source, denied, clone.Label{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "work_mem")
 	assert.Contains(t, err.Error(), "role "+cfg.User)
@@ -214,11 +227,15 @@ func TestPGCloneRenames(t *testing.T) {
 	require.NoError(t, session.Exec(t.Context(), "insert into coupons values ('KEPT')"))
 
 	a := pgclone.New(cfg)
-	require.ErrorIs(t, a.Rename(t.Context(), from, to), clone.ErrSourceBusy, "a session is still on it")
+	label := clone.Label{Repo: "/src/shop/.git", Branch: "renamed", Database: from}
+	require.ErrorIs(t, a.Rename(t.Context(), from, to, label), clone.ErrSourceBusy, "a session is still on it")
+	assert.Empty(t, databaseComment(t, admin, from), "a failed rename labels nothing")
 
 	_, err := a.Terminate(t.Context(), from)
 	require.NoError(t, err)
-	require.NoError(t, a.Rename(t.Context(), from, to))
+	require.NoError(t, a.Rename(t.Context(), from, to, label))
+	assert.JSONEq(t, `{"pgswitch":1,"repo":"/src/shop/.git","branch":"renamed","database":"`+from+`"}`,
+		databaseComment(t, admin, to))
 
 	onTo := cfg
 	onTo.Database = to
