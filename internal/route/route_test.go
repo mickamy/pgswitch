@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/mickamy/pgswitch/internal/ident"
 	"github.com/mickamy/pgswitch/internal/route"
 )
 
@@ -26,12 +27,17 @@ func TestPhysicalName(t *testing.T) {
 		"feature branch": {
 			db:     "shop_development",
 			branch: "feature/coupons",
-			want:   "shop_development__feature_coupons",
+			want:   "shop_development__feature_coupons_" + ident.ShortHash("shop_development", "feature/coupons"),
 		},
 		"fits exactly in 63 bytes": {
-			db:     strings.Repeat("d", 50),
+			db:     strings.Repeat("d", 41),
 			branch: "feature/abc",
-			want:   strings.Repeat("d", 50) + "__feature_abc",
+			want:   strings.Repeat("d", 41) + "__feature_abc_" + ident.ShortHash(strings.Repeat("d", 41), "feature/abc"),
+		},
+		"branch without alphanumerics": {
+			db:     "shop_development",
+			branch: "---",
+			want:   "shop_development_" + ident.ShortHash("shop_development", "---"),
 		},
 	}
 
@@ -44,7 +50,7 @@ func TestPhysicalName(t *testing.T) {
 	}
 }
 
-func TestPhysicalNameHashed(t *testing.T) {
+func TestPhysicalNameTruncated(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]struct {
@@ -56,11 +62,6 @@ func TestPhysicalNameHashed(t *testing.T) {
 			db:         "shop_development",
 			branch:     "feature/" + strings.Repeat("x", 60),
 			wantPrefix: "shop_development__feature_xxx",
-		},
-		"branch without alphanumerics": {
-			db:         "shop_development",
-			branch:     "---",
-			wantPrefix: "shop_development_",
 		},
 		"multibyte database name is not split": {
 			db:         strings.Repeat("あ", 20),
@@ -78,20 +79,33 @@ func TestPhysicalNameHashed(t *testing.T) {
 			assert.LessOrEqual(t, len(got), 63)
 			assert.True(t, utf8.ValidString(got), "invalid UTF-8: %q", got)
 			assert.True(t, strings.HasPrefix(got, tt.wantPrefix), "%q does not start with %q", got, tt.wantPrefix)
-			assert.Equal(t, got, route.PhysicalName(tt.db, tt.branch, "main"))
+			assert.True(t, strings.HasSuffix(got, "_"+ident.ShortHash(tt.db, tt.branch)), "%q has no hash suffix", got)
 		})
 	}
 }
 
-func TestPhysicalNameHashDistinguishesTruncatedBranches(t *testing.T) {
+func TestPhysicalNameDistinguishesBranches(t *testing.T) {
 	t.Parallel()
 
 	long := "feature/" + strings.Repeat("x", 60)
+	tests := map[string]struct {
+		a, b string
+	}{
+		"same slug":           {a: "feature/foo", b: "feature-foo"},
+		"case only":           {a: "feature/foo", b: "Feature/Foo"},
+		"same after truncate": {a: long + "a", b: long + "b"},
+	}
 
-	assert.NotEqual(t,
-		route.PhysicalName("shop_development", long+"a", "main"),
-		route.PhysicalName("shop_development", long+"b", "main"),
-	)
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.NotEqual(t,
+				route.PhysicalName("shop_development", tt.a, "main"),
+				route.PhysicalName("shop_development", tt.b, "main"),
+			)
+		})
+	}
 }
 
 func TestSlug(t *testing.T) {

@@ -13,19 +13,16 @@ const maxIdentifierLen = 63
 const separator = "__"
 
 // PhysicalName returns the database that db maps to on branch.
-// The default branch keeps the original name.
+// The default branch keeps the original name. Other branches always carry a
+// hash of the exact branch name, because slugs collide (feature/foo and
+// feature-foo).
 func PhysicalName(db, branch, defaultBranch string) string {
 	if branch == defaultBranch {
 		return db
 	}
 
-	s := slug(branch)
-	name := db + separator + s
-	if s != "" && len(name) <= maxIdentifierLen {
-		return name
-	}
-
 	suffix := "_" + ident.ShortHash(db, branch)
+	name := db + separator + slug(branch)
 	prefix := strings.TrimRight(utf8.Truncate(name, maxIdentifierLen-len(suffix)), "_")
 
 	return prefix + suffix
