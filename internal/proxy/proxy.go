@@ -37,11 +37,11 @@ func (f RouterFunc) Route(ctx context.Context, client net.Addr, database string)
 type Proxy struct {
 	upstream string
 	router   Router
-	log      *slog.Logger
+	logger   *slog.Logger
 }
 
-func New(upstream string, router Router, log *slog.Logger) Proxy {
-	return Proxy{upstream: upstream, router: router, log: log}
+func New(upstream string, router Router, logger *slog.Logger) Proxy {
+	return Proxy{upstream: upstream, router: router, logger: logger}
 }
 
 // Serve accepts connections on ln until ctx is canceled, then closes every
@@ -69,30 +69,30 @@ func (p Proxy) Serve(ctx context.Context, ln net.Listener) error {
 func (p Proxy) handle(ctx context.Context, client net.Conn) {
 	defer closeOnDone(ctx, client)()
 
-	log := p.log.With("client", client.RemoteAddr().String())
+	logger := p.logger.With("client", client.RemoteAddr().String())
 
 	pkt, err := negotiate(client)
 	if err != nil {
-		logNegotiationError(log, err)
+		logNegotiationError(logger, err)
 
 		return
 	}
 
 	switch pkt.Kind() {
 	case pgwire.KindCancelRequest:
-		p.forwardCancel(ctx, pkt, log)
+		p.forwardCancel(ctx, pkt, logger)
 
 		return
 	case pgwire.KindStartup:
 	case pgwire.KindUnknown, pgwire.KindSSLRequest, pgwire.KindGSSENCRequest:
-		reject(client, log, pgwire.CodeProtocolViolation, fmt.Sprintf("unsupported request code %d", pkt.Code))
+		reject(client, logger, pgwire.CodeProtocolViolation, fmt.Sprintf("unsupported request code %d", pkt.Code))
 
 		return
 	}
 
 	startup, err := pgwire.ParseStartup(pkt)
 	if err != nil {
-		reject(client, log, pgwire.CodeProtocolViolation, err.Error())
+		reject(client, logger, pgwire.CodeProtocolViolation, err.Error())
 
 		return
 	}
@@ -100,7 +100,7 @@ func (p Proxy) handle(ctx context.Context, client net.Conn) {
 	requested := startup.Database()
 	physical, err := p.router.Route(ctx, client.RemoteAddr(), requested)
 	if err != nil {
-		reject(client, log, pgwire.CodeConnectionRejection, "pgswitch: route "+requested+": "+err.Error())
+		reject(client, logger, pgwire.CodeConnectionRejection, "pgswitch: route "+requested+": "+err.Error())
 
 		return
 	}
@@ -108,18 +108,18 @@ func (p Proxy) handle(ctx context.Context, client net.Conn) {
 	var d net.Dialer
 	upstream, err := d.DialContext(ctx, "tcp", p.upstream)
 	if err != nil {
-		reject(client, log, pgwire.CodeConnectionFailure, "pgswitch: connect to upstream: "+err.Error())
+		reject(client, logger, pgwire.CodeConnectionFailure, "pgswitch: connect to upstream: "+err.Error())
 
 		return
 	}
 	defer closeOnDone(ctx, upstream)()
 
 	if _, err := upstream.Write(startup.WithParam("database", physical).Packet().Bytes()); err != nil {
-		log.Warn("forward startup", "err", err)
+		logger.Warn("forward startup", "err", err)
 
 		return
 	}
-	log.Info("routed", "database", requested, "physical", physical)
+	logger.Info("routed", "database", requested, "physical", physical)
 
 	splice(client, upstream)
 }
@@ -152,46 +152,46 @@ func negotiate(conn net.Conn) (pgwire.Packet, error) {
 	}
 }
 
-func logNegotiationError(log *slog.Logger, err error) {
+func logNegotiationError(logger *slog.Logger, err error) {
 	switch {
 	case errors.Is(err, io.EOF):
-		log.Debug("closed before startup")
+		logger.Debug("closed before startup")
 	case errors.Is(err, pgwire.ErrDirectSSL):
-		log.Warn("rejected direct SSL; connect with sslmode=disable", "err", err)
+		logger.Warn("rejected direct SSL; connect with sslmode=disable", "err", err)
 	default:
-		log.Warn("negotiation failed", "err", err)
+		logger.Warn("negotiation failed", "err", err)
 	}
 }
 
 // forwardCancel relays a CancelRequest verbatim: there is one upstream, so the
 // backend key is valid there whatever database the backend serves.
-func (p Proxy) forwardCancel(ctx context.Context, pkt pgwire.Packet, log *slog.Logger) {
+func (p Proxy) forwardCancel(ctx context.Context, pkt pgwire.Packet, logger *slog.Logger) {
 	var d net.Dialer
 	upstream, err := d.DialContext(ctx, "tcp", p.upstream)
 	if err != nil {
-		log.Warn("forward cancel", "err", err)
+		logger.Warn("forward cancel", "err", err)
 
 		return
 	}
 	defer closeOnDone(ctx, upstream)()
 
 	if _, err := upstream.Write(pkt.Bytes()); err != nil {
-		log.Warn("forward cancel", "err", err)
+		logger.Warn("forward cancel", "err", err)
 
 		return
 	}
 	// The server closes the connection once it has processed the cancel. Like
 	// libpq, wait for that so a late cancel cannot hit the client's next query.
 	if _, err := io.Copy(io.Discard, upstream); err != nil && ctx.Err() == nil {
-		log.Debug("wait for cancel", "err", err)
+		logger.Debug("wait for cancel", "err", err)
 	}
-	log.Debug("forwarded cancel")
+	logger.Debug("forwarded cancel")
 }
 
-func reject(client net.Conn, log *slog.Logger, code, message string) {
-	log.Warn("rejected", "code", code, "reason", message)
+func reject(client net.Conn, logger *slog.Logger, code, message string) {
+	logger.Warn("rejected", "code", code, "reason", message)
 	if _, err := client.Write(pgwire.FatalError(code, message)); err != nil {
-		log.Debug("write error response", "err", err)
+		logger.Debug("write error response", "err", err)
 	}
 }
 
