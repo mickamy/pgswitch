@@ -1,0 +1,122 @@
+package control
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"net"
+	"net/http"
+	"os"
+	"time"
+)
+
+const (
+	statusPath        = "/status"
+	readHeaderTimeout = 5 * time.Second
+	shutdownTimeout   = 5 * time.Second
+)
+
+// ErrRunning means another serve owns the control socket.
+var ErrRunning = errors.New("control: pgswitch serve is already running")
+
+// Connection is one connection being relayed, as status reports it.
+type Connection struct {
+	Repo      string    `json:"repo"`
+	Worktree  string    `json:"worktree"`
+	Branch    string    `json:"branch"`
+	Database  string    `json:"database"`
+	Requested string    `json:"requested"`
+	PID       int       `json:"pid"`
+	Command   string    `json:"command"`
+	Client    string    `json:"client"`
+	Since     time.Time `json:"since"`
+}
+
+type Status struct {
+	Connections []Connection `json:"connections"`
+}
+
+// Listen opens the control socket at path, replacing one left behind by a
+// serve that is gone, but not one still answering.
+func Listen(ctx context.Context, path string) (net.Listener, error) {
+	var d net.Dialer
+	if conn, err := d.DialContext(ctx, "unix", path); err == nil {
+		_ = conn.Close()
+
+		return nil, fmt.Errorf("%w: %s", ErrRunning, path)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("control: %w", err)
+	}
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "unix", path)
+	if err != nil {
+		return nil, fmt.Errorf("control: %w", err)
+	}
+
+	return ln, nil
+}
+
+// Serve answers status requests on ln until ctx ends.
+func Serve(ctx context.Context, ln net.Listener, status func() Status) error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET "+statusPath, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(status())
+	})
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: readHeaderTimeout}
+
+	stop := context.AfterFunc(ctx, func() {
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	})
+	defer stop()
+
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("control: %w", err)
+	}
+
+	return nil
+}
+
+// Client asks a running serve over its control socket.
+type Client struct {
+	http *http.Client
+}
+
+func NewClient(path string) Client {
+	var d net.Dialer
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return d.DialContext(ctx, "unix", path)
+		},
+	}
+
+	return Client{http: &http.Client{Transport: transport}}
+}
+
+func (c Client) Status(ctx context.Context) (Status, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://pgswitch"+statusPath, nil)
+	if err != nil {
+		return Status{}, fmt.Errorf("control: %w", err)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return Status{}, fmt.Errorf("control: is pgswitch serve running? %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return Status{}, fmt.Errorf("control: status: %s", resp.Status)
+	}
+	var s Status
+	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+		return Status{}, fmt.Errorf("control: %w", err)
+	}
+
+	return s, nil
+}
