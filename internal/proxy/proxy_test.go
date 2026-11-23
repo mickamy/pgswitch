@@ -407,3 +407,39 @@ func TestSeverClosesTheOwnersConnections(t *testing.T) {
 		require.NoError(t, err, "other connections stay up")
 	}
 }
+
+func TestConnsListsRelayedConnections(t *testing.T) {
+	t.Parallel()
+
+	upstream, received := startUpstream(t)
+	described := proxy.RouterFunc(func(_ context.Context, _, _ net.Addr, database string) (proxy.Route, error) {
+		return proxy.Route{
+			Database: database + "__fix_tax", Owner: "/src/shop-fix-tax",
+			Repo: "shop", Branch: "fix-tax", PID: 48211, Command: "ruby",
+		}, nil
+	})
+	p := proxy.New(upstream, described, slog.New(slog.DiscardHandler))
+	addr, _ := serveProxy(t, p)
+
+	conn := dial(t, addr)
+	_, err := conn.Write(startupPacket(
+		pgwire.Param{Name: "user", Value: "alice"},
+		pgwire.Param{Name: "database", Value: "shop_development"},
+	))
+	require.NoError(t, err)
+	receive(t, received)
+
+	conns := p.Conns()
+	require.Len(t, conns, 1)
+	got := conns[0]
+	assert.Equal(t, proxy.Route{
+		Database: "shop_development__fix_tax", Owner: "/src/shop-fix-tax",
+		Repo: "shop", Branch: "fix-tax", PID: 48211, Command: "ruby",
+	}, got.Route)
+	assert.Equal(t, "shop_development", got.Requested)
+	assert.Equal(t, conn.LocalAddr().String(), got.Client)
+	assert.WithinDuration(t, time.Now(), got.Since, 5*time.Second)
+
+	require.NoError(t, conn.Close())
+	assert.Eventually(t, func() bool { return len(p.Conns()) == 0 }, 5*time.Second, 10*time.Millisecond)
+}

@@ -15,7 +15,10 @@ var (
 // Process is the local process at the other end of a TCP connection.
 type Process struct {
 	PID int
-	Cwd string
+	// Command is the program's name, as the OS reports it; Linux keeps the
+	// first 15 bytes.
+	Command string
+	Cwd     string
 }
 
 // Lookup finds the local process that owns the client end of the TCP

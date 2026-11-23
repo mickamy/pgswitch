@@ -1,7 +1,7 @@
 package peer
 
 var (
-	PIDFromLsof         = pidFromLsof
+	ProcessFromLsof     = processFromLsof
 	CwdFromLsof         = cwdFromLsof
 	InodeFromProcNetTCP = inodeFromProcNetTCP
 	ParseProcAddr       = parseProcAddr

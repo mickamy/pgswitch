@@ -8,13 +8,16 @@ import (
 	"net"
 	"os"
 	"os/user"
+	"path/filepath"
 
 	"github.com/mickamy/pgswitch/internal/clone"
 	"github.com/mickamy/pgswitch/internal/clone/pgclone"
+	"github.com/mickamy/pgswitch/internal/control"
 	"github.com/mickamy/pgswitch/internal/exit"
 	"github.com/mickamy/pgswitch/internal/pgadmin"
 	"github.com/mickamy/pgswitch/internal/proxy"
 	"github.com/mickamy/pgswitch/internal/router"
+	"github.com/mickamy/pgswitch/internal/statedir"
 	"github.com/mickamy/pgswitch/internal/watch"
 )
 
@@ -29,6 +32,7 @@ func runServe(ctx context.Context, args []string, std IO) int {
 	upstream := fs.String("upstream", defaultUpstream, "address of the Postgres server")
 	adminUser := fs.String("admin-user", currentUser(), "role that creates branch databases; password from PGPASSWORD")
 	debug := fs.Bool("debug", false, "log how each connection is attributed")
+	controlPath := fs.String("control", defaultControl(), "control socket for status; empty to disable")
 	if err := fs.Parse(args); err != nil {
 		return exit.Usage
 	}
@@ -68,6 +72,12 @@ func runServe(ctx context.Context, args []string, std IO) int {
 	p = proxy.New(*upstream, r, logger)
 	go w.Run(ctx)
 
+	if *controlPath != "" {
+		if err := serveControl(ctx, *controlPath, p, logger); err != nil {
+			return fail(std, err)
+		}
+	}
+
 	logger.Info("serving", "listen", ln.Addr().String(), "upstream", *upstream, "admin_user", *adminUser)
 	if err := p.Serve(ctx, ln); err != nil {
 		return fail(std, err)
@@ -85,6 +95,34 @@ func printServeUsage(w io.Writer) {
 	fmt.Fprint(w, "  -admin-user NAME  role that creates branch databases (default: the OS user)\n")
 	fmt.Fprint(w, "                    its password is read from PGPASSWORD\n")
 	fmt.Fprint(w, "  -debug            log how each connection is attributed\n")
+	fmt.Fprint(w, "  -control PATH     control socket for status; empty to disable (default: in the state directory)\n")
+}
+
+func defaultControl() string {
+	path, err := statedir.Socket()
+	if err != nil {
+		return ""
+	}
+
+	return path
+}
+
+// serveControl answers pgswitch status on the socket at path until ctx ends.
+func serveControl(ctx context.Context, path string, p proxy.Proxy, logger *slog.Logger) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("control socket: %w", err)
+	}
+	ln, err := control.Listen(ctx, path)
+	if err != nil {
+		return fmt.Errorf("control socket: %w", err)
+	}
+	go func() {
+		if err := control.Serve(ctx, ln, func() control.Status { return statusOf(p.Conns()) }); err != nil {
+			logger.Warn("control socket", "err", err)
+		}
+	}()
+
+	return nil
 }
 
 func currentUser() string {
