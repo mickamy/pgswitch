@@ -11,7 +11,7 @@ test:
 
 # Needs a Postgres: PGSWITCH_E2E_ADDR=127.0.0.1:5432 PGSWITCH_E2E_PASSWORD=... make e2e
 e2e:
-	go test -race -tags e2e ./e2e/...
+	go test -race -tags e2e ./...
 
 lint:
 	golangci-lint run

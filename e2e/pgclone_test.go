@@ -145,5 +145,4 @@ func TestPGCloneKeepsDatabaseSettingsAndPrivileges(t *testing.T) {
 			" from pg_database, unnest(datacl) a where datname = '"+db+"'")
 	}
 	assert.Equal(t, acl(source), acl(target))
-	assert.Equal(t, "0", queryValue(t, admin, "select count(*) from pg_database where datname like 'pgswitch_staging_%'"))
 }

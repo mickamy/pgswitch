@@ -2,12 +2,13 @@ package pgclone
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
 
 	"github.com/mickamy/pgswitch/internal/clone"
-	"github.com/mickamy/pgswitch/internal/ident"
 	"github.com/mickamy/pgswitch/internal/pgadmin"
 	"github.com/mickamy/pgswitch/internal/pgadmin/quote"
 	"github.com/mickamy/pgswitch/internal/pgwire"
@@ -20,6 +21,9 @@ const (
 	codeObjectInUse           = "55006"
 	codeDuplicateDatabase     = "42P04"
 	codeInsufficientPrivilege = "42501"
+
+	stagingPrefix   = "pgswitch_staging_"
+	stagingAttempts = 3
 )
 
 var ErrUnsupportedVersion = fmt.Errorf("pgclone: Postgres %d or later is required", MinVersionMajor)
@@ -27,13 +31,14 @@ var ErrUnsupportedVersion = fmt.Errorf("pgclone: Postgres %d or later is require
 // Admin implements clone.Admin with a fresh admin connection per call, so it
 // is safe for concurrent use.
 type Admin struct {
-	cfg pgadmin.Config
+	cfg            pgadmin.Config
+	newStagingName func() string
 }
 
 var _ clone.Admin = Admin{}
 
 func New(cfg pgadmin.Config) Admin {
-	return Admin{cfg: cfg}
+	return Admin{cfg: cfg, newStagingName: randomStagingName}
 }
 
 func (a Admin) Exists(ctx context.Context, db string) (bool, error) {
@@ -98,22 +103,9 @@ func (a Admin) Copy(ctx context.Context, source, target string) error {
 	}
 	owner := rows[0][0].String
 
-	staging := stagingName(target)
-	if err := dropDatabase(ctx, conn, staging); err != nil {
+	staging, err := a.createStaging(ctx, conn, source, owner)
+	if err != nil {
 		return err
-	}
-
-	err = conn.Exec(ctx, "create database "+quote.Ident(staging)+
-		" template "+quote.Ident(source)+
-		" owner "+quote.Ident(owner)+
-		" strategy file_copy")
-	var serverErr pgwire.ServerError
-	switch {
-	case err == nil:
-	case errors.As(err, &serverErr) && serverErr.Code == codeObjectInUse:
-		return fmt.Errorf("%w: %w", clone.ErrSourceBusy, err)
-	default:
-		return fmt.Errorf("pgclone: %w", err)
 	}
 
 	if err := finish(ctx, conn, source, staging, target, owner); err != nil {
@@ -123,6 +115,31 @@ func (a Admin) Copy(ctx context.Context, source, target string) error {
 	}
 
 	return nil
+}
+
+// createStaging copies source under a fresh name. It never drops a database it
+// did not create: a name that is taken is skipped, not reclaimed.
+func (a Admin) createStaging(ctx context.Context, conn pgadmin.Conn, source, owner string) (string, error) {
+	for range stagingAttempts {
+		staging := a.newStagingName()
+		err := conn.Exec(ctx, "create database "+quote.Ident(staging)+
+			" template "+quote.Ident(source)+
+			" owner "+quote.Ident(owner)+
+			" strategy file_copy")
+		var serverErr pgwire.ServerError
+		switch {
+		case err == nil:
+			return staging, nil
+		case errors.As(err, &serverErr) && serverErr.Code == codeDuplicateDatabase:
+			continue
+		case errors.As(err, &serverErr) && serverErr.Code == codeObjectInUse:
+			return "", fmt.Errorf("%w: %w", clone.ErrSourceBusy, err)
+		default:
+			return "", fmt.Errorf("pgclone: %w", err)
+		}
+	}
+
+	return "", fmt.Errorf("pgclone: no free staging name after %d attempts", stagingAttempts)
 }
 
 // finish copies what CREATE DATABASE leaves behind, then publishes staging as
@@ -211,9 +228,14 @@ func dropDatabase(ctx context.Context, conn pgadmin.Conn, db string) error {
 	return nil
 }
 
-// stagingName is where target is built before it is renamed into place.
-func stagingName(target string) string {
-	return "pgswitch_staging_" + ident.ShortHash(target)
+// randomStagingName names a database that a copy is built in before it is
+// renamed into place. Each attempt gets its own, so concurrent copies and
+// other pgswitch instances never share one.
+func randomStagingName() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b) // never fails
+
+	return stagingPrefix + hex.EncodeToString(b)
 }
 
 func (a Admin) connect(ctx context.Context) (pgadmin.Conn, func(), error) {
