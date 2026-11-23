@@ -30,23 +30,33 @@ func runLog(ctx context.Context, args []string, std IO) int {
 		return exit.Usage
 	}
 
+	// A failed write ends the stream at once rather than after the next
+	// event, or never with -f; it is told apart from an interrupt by writeErr.
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
 	enc := json.NewEncoder(std.Out)
 	var writeErr error
 	emit := func(e events.Event) {
-		if !*asJSON {
-			fmt.Fprintln(std.Out, formatEvent(e))
-
+		if writeErr != nil {
 			return
 		}
-		if err := enc.Encode(e); err != nil && writeErr == nil {
+		var err error
+		if *asJSON {
+			err = enc.Encode(e)
+		} else {
+			_, err = fmt.Fprintln(std.Out, formatEvent(e))
+		}
+		if err != nil {
 			writeErr = err
+			stop()
 		}
 	}
-	if err := control.NewClient(*controlPath).Log(ctx, *follow, emit); err != nil {
-		return fail(std, err)
-	}
+	err := control.NewClient(*controlPath).Log(ctx, *follow, emit)
 	if writeErr != nil {
 		return fail(std, writeErr)
+	}
+	if err != nil {
+		return fail(std, err)
 	}
 
 	return exit.OK

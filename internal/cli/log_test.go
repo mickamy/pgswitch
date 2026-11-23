@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -115,4 +116,36 @@ func TestServeKeepsItsLogForLog(t *testing.T) { //nolint:paralleltest // t.Chdir
 
 	cancel()
 	assert.Equal(t, exit.OK, <-done)
+}
+
+// brokenWriter fails every write, as a full disk does.
+type brokenWriter struct{}
+
+func (brokenWriter) Write([]byte) (int, error) { return 0, errors.New("no space left on device") }
+
+func TestLogFailsOnOutputErrors(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
+	t.Chdir(t.TempDir())
+	serveEvents(t, sampleEvents())
+
+	for name, flags := range map[string][]string{
+		"text":        nil,
+		"json":        {"-json"},
+		"follow text": {"-f"},
+		"follow json": {"-f", "-json"},
+	} {
+		done := make(chan int, 1)
+		var errOut bytes.Buffer
+		go func() {
+			std := cli.IO{In: strings.NewReader(""), Out: brokenWriter{}, Err: &errOut}
+			done <- cli.Run(t.Context(), append([]string{"log", "-control", socket}, flags...), std)
+		}()
+
+		select {
+		case code := <-done:
+			assert.Equal(t, exit.Error, code, name)
+			assert.Contains(t, errOut.String(), "no space left on device", name)
+		case <-time.After(5 * time.Second):
+			require.FailNow(t, "log kept running after its output failed", name)
+		}
+	}
 }
