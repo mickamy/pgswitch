@@ -16,6 +16,7 @@ import (
 
 	"github.com/mickamy/pgswitch/internal/clone"
 	"github.com/mickamy/pgswitch/internal/peer"
+	"github.com/mickamy/pgswitch/internal/proxy"
 	"github.com/mickamy/pgswitch/internal/route"
 	"github.com/mickamy/pgswitch/internal/router"
 )
@@ -99,44 +100,46 @@ func lookupAt(cwd string) lookupFunc {
 func TestRoute(t *testing.T) {
 	t.Parallel()
 
+	// Each setup returns the connecting process's cwd and the owner the
+	// connection should be routed for.
 	tests := map[string]struct {
-		setup func(t *testing.T, repo string) (cwd string)
+		setup func(t *testing.T, repo string) (cwd, owner string)
 		want  string
 	}{
 		"default branch keeps the name": {
-			setup: func(_ *testing.T, repo string) string { return repo },
+			setup: func(_ *testing.T, repo string) (string, string) { return repo, repo },
 			want:  database,
 		},
 		"feature branch": {
-			setup: func(t *testing.T, repo string) string {
+			setup: func(t *testing.T, repo string) (string, string) {
 				runGit(t, repo, "switch", "-q", "-c", "feature/coupons")
 
-				return repo
+				return repo, repo
 			},
 			want: route.PhysicalName(database, "feature/coupons", "main"),
 		},
 		"subdirectory of a linked worktree": {
-			setup: func(t *testing.T, repo string) string {
+			setup: func(t *testing.T, repo string) (string, string) {
 				linked := repo + "-fix-tax"
 				runGit(t, repo, "worktree", "add", "-q", "-b", "fix-tax", linked)
 				t.Cleanup(func() { _ = os.RemoveAll(linked) })
 				sub := filepath.Join(linked, "app")
 				require.NoError(t, os.Mkdir(sub, 0o750))
 
-				return sub
+				return sub, linked
 			},
 			want: route.PhysicalName(database, "fix-tax", "main"),
 		},
 		"detached HEAD goes to the default branch": {
-			setup: func(t *testing.T, repo string) string {
+			setup: func(t *testing.T, repo string) (string, string) {
 				runGit(t, repo, "switch", "-q", "--detach")
 
-				return repo
+				return repo, repo
 			},
 			want: database,
 		},
 		"outside any repository passes through": {
-			setup: func(t *testing.T, _ string) string { return t.TempDir() },
+			setup: func(t *testing.T, _ string) (string, string) { return t.TempDir(), "" },
 			want:  database,
 		},
 	}
@@ -145,13 +148,13 @@ func TestRoute(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			cwd := tt.setup(t, newRepo(t))
+			cwd, owner := tt.setup(t, newRepo(t))
 			r := newRouter(&fakeCloner{}, lookupAt(cwd))
 
 			got, err := r.Route(t.Context(), client, server, database)
 			require.NoError(t, err)
 
-			assert.Equal(t, tt.want, got)
+			assert.Equal(t, proxy.Route{Database: tt.want, Owner: owner}, got)
 		})
 	}
 }
@@ -201,7 +204,7 @@ func TestRouteUnattributed(t *testing.T) {
 			got, err := r.Route(t.Context(), tt.client, server, database)
 			require.NoError(t, err)
 
-			assert.Equal(t, database, got)
+			assert.Equal(t, proxy.Route{Database: database}, got)
 		})
 	}
 }
@@ -270,7 +273,7 @@ func TestRouteClones(t *testing.T) {
 				require.ErrorIs(t, err, tt.cloneErr)
 			} else {
 				require.NoError(t, err)
-				assert.Equal(t, tt.want, got)
+				assert.Equal(t, tt.want, got.Database)
 			}
 			assert.Equal(t, tt.wantEnsured, cloner.ensured)
 			assert.Equal(t, tt.wantWaitedOn, cloner.waited)
