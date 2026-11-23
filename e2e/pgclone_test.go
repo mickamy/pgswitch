@@ -91,3 +91,53 @@ func TestPGCloneQuotesRegardlessOfStringSettings(t *testing.T) {
 		assert.Equal(t, want, exists, name)
 	}
 }
+
+// TestPGCloneKeepsDatabaseSettingsAndPrivileges covers what CREATE DATABASE
+// does not copy: ALTER DATABASE/ROLE ... SET entries and the database ACL.
+func TestPGCloneKeepsDatabaseSettingsAndPrivileges(t *testing.T) {
+	t.Parallel()
+
+	cfg := adminConfig(t)
+	admin := connect(t, cfg)
+
+	appRole := uniqueName("pgswitch_e2e_app")
+	require.NoError(t, admin.Exec(t.Context(), `create role "`+appRole+`" nologin`))
+	// Registered first so it runs last, after the databases that mention it are gone.
+	t.Cleanup(func() { _ = admin.Exec(context.WithoutCancel(t.Context()), `drop role if exists "`+appRole+`"`) })
+
+	source := uniqueName("pgswitch_e2e")
+	target := source + "__fix_tax"
+	createDatabase(t, admin, source)
+	dropOnCleanup(t, admin, target)
+
+	for _, stmt := range []string{
+		`alter database "` + source + `" set search_path = app, public`,
+		`alter role "` + cfg.User + `" in database "` + source + `" set work_mem = '8MB'`,
+		`grant create on database "` + source + `" to "` + appRole + `"`,
+		`revoke connect on database "` + source + `" from public`,
+	} {
+		require.NoError(t, admin.Exec(t.Context(), stmt))
+	}
+	onSource := cfg
+	onSource.Database = source
+	seed := connect(t, onSource)
+	require.NoError(t, seed.Exec(t.Context(), "create schema app"))
+	require.NoError(t, seed.Exec(t.Context(), "create table app.items (name text)"))
+	require.NoError(t, seed.Close())
+
+	require.NoError(t, pgclone.New(cfg).Copy(t.Context(), source, target))
+
+	onTarget := cfg
+	onTarget.Database = target
+	clone := connect(t, onTarget)
+	assert.Equal(t, "app, public", queryValue(t, clone, "show search_path"))
+	assert.Equal(t, "8MB", queryValue(t, clone, "show work_mem"))
+	assert.Equal(t, "0", queryValue(t, clone, "select count(*) from items"))
+
+	acl := func(db string) string {
+		return queryValue(t, admin, "select array_agg(a::text order by a::text)"+
+			" from pg_database, unnest(datacl) a where datname = '"+db+"'")
+	}
+	assert.Equal(t, acl(source), acl(target))
+	assert.Equal(t, "0", queryValue(t, admin, "select count(*) from pg_database where datname like 'pgswitch_staging_%'"))
+}

@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/mickamy/pgswitch/internal/clone"
+	"github.com/mickamy/pgswitch/internal/ident"
 	"github.com/mickamy/pgswitch/internal/pgadmin"
 	"github.com/mickamy/pgswitch/internal/pgadmin/quote"
 	"github.com/mickamy/pgswitch/internal/pgwire"
@@ -16,8 +17,9 @@ const (
 	// MinVersionMajor is the oldest Postgres pgswitch supports.
 	MinVersionMajor = 15
 
-	codeObjectInUse       = "55006"
-	codeDuplicateDatabase = "42P04"
+	codeObjectInUse           = "55006"
+	codeDuplicateDatabase     = "42P04"
+	codeInsufficientPrivilege = "42501"
 )
 
 var ErrUnsupportedVersion = fmt.Errorf("pgclone: Postgres %d or later is required", MinVersionMajor)
@@ -72,7 +74,10 @@ func (a Admin) Terminate(ctx context.Context, db string) (int, error) {
 	return n, nil
 }
 
-// Copy creates target from source, owned by source's owner.
+// Copy creates target from source, owned by source's owner and with its
+// database-level settings and privileges, which CREATE DATABASE does not copy.
+// It builds the copy under a staging name and renames it once complete, so no
+// connection reaches a half-configured target.
 func (a Admin) Copy(ctx context.Context, source, target string) error {
 	conn, done, err := a.connect(ctx)
 	if err != nil {
@@ -93,21 +98,122 @@ func (a Admin) Copy(ctx context.Context, source, target string) error {
 	}
 	owner := rows[0][0].String
 
-	err = conn.Exec(ctx, "create database "+quote.Ident(target)+
+	staging := stagingName(target)
+	if err := dropDatabase(ctx, conn, staging); err != nil {
+		return err
+	}
+
+	err = conn.Exec(ctx, "create database "+quote.Ident(staging)+
 		" template "+quote.Ident(source)+
 		" owner "+quote.Ident(owner)+
 		" strategy file_copy")
 	var serverErr pgwire.ServerError
 	switch {
 	case err == nil:
-		return nil
 	case errors.As(err, &serverErr) && serverErr.Code == codeObjectInUse:
 		return fmt.Errorf("%w: %w", clone.ErrSourceBusy, err)
-	case errors.As(err, &serverErr) && serverErr.Code == codeDuplicateDatabase:
-		return nil
 	default:
 		return fmt.Errorf("pgclone: %w", err)
 	}
+
+	if err := finish(ctx, conn, source, staging, target, owner); err != nil {
+		_ = dropDatabase(context.WithoutCancel(ctx), conn, staging)
+
+		return err
+	}
+
+	return nil
+}
+
+// finish copies what CREATE DATABASE leaves behind, then publishes staging as
+// target.
+func finish(ctx context.Context, conn pgadmin.Conn, source, staging, target, owner string) error {
+	if err := copyPrivileges(ctx, conn, source, staging, owner); err != nil {
+		return err
+	}
+	if err := copySettings(ctx, conn, source, staging); err != nil {
+		return err
+	}
+
+	err := conn.Exec(ctx, "alter database "+quote.Ident(staging)+" rename to "+quote.Ident(target))
+	var serverErr pgwire.ServerError
+	if errors.As(err, &serverErr) && serverErr.Code == codeDuplicateDatabase {
+		return dropDatabase(ctx, conn, staging)
+	}
+	if err != nil {
+		return fmt.Errorf("pgclone: publish %s: %w", target, err)
+	}
+
+	return nil
+}
+
+// copyPrivileges reproduces source's ACL on staging. A NULL ACL means the
+// defaults, which staging already has.
+func copyPrivileges(ctx context.Context, conn pgadmin.Conn, source, staging, owner string) error {
+	rows, err := conn.Query(ctx, "select datacl is null from pg_database where datname = "+quote.Literal(source))
+	if err != nil {
+		return fmt.Errorf("pgclone: read privileges of %s: %w", source, err)
+	}
+	if len(rows) != 1 || rows[0][0].String == "t" {
+		return nil
+	}
+
+	grants, err := conn.Query(ctx, "select case when a.grantee = 0 then 'public'"+
+		" else quote_ident(pg_get_userbyid(a.grantee)) end, a.privilege_type, a.is_grantable"+
+		" from pg_database d, aclexplode(d.datacl) a where d.datname = "+quote.Literal(source))
+	if err != nil {
+		return fmt.Errorf("pgclone: read privileges of %s: %w", source, err)
+	}
+
+	db := quote.Ident(staging)
+	stmts := []string{"revoke all on database " + db + " from public, " + quote.Ident(owner)}
+	for _, g := range grants {
+		grantee, privilege, grantable := g[0].String, g[1].String, g[2].String == "t"
+		stmt := "grant " + privilege + " on database " + db + " to " + grantee
+		if grantable {
+			stmt += " with grant option"
+		}
+		stmts = append(stmts, stmt)
+	}
+	for _, stmt := range stmts {
+		if err := conn.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("pgclone: copy privileges of %s: %w", source, err)
+		}
+	}
+
+	return nil
+}
+
+// copySettings duplicates source's ALTER DATABASE ... SET and ALTER ROLE ... IN
+// DATABASE ... SET entries. Copying the catalog rows keeps the values exactly,
+// including list settings such as search_path; it needs a superuser.
+func copySettings(ctx context.Context, conn pgadmin.Conn, source, staging string) error {
+	err := conn.Exec(ctx, "insert into pg_db_role_setting (setdatabase, setrole, setconfig)"+
+		" select (select oid from pg_database where datname = "+quote.Literal(staging)+"), s.setrole, s.setconfig"+
+		" from pg_db_role_setting s join pg_database d on d.oid = s.setdatabase"+
+		" where d.datname = "+quote.Literal(source))
+	var serverErr pgwire.ServerError
+	if errors.As(err, &serverErr) && serverErr.Code == codeInsufficientPrivilege {
+		return fmt.Errorf("pgclone: copying database settings needs a superuser admin role: %w", err)
+	}
+	if err != nil {
+		return fmt.Errorf("pgclone: copy settings of %s: %w", source, err)
+	}
+
+	return nil
+}
+
+func dropDatabase(ctx context.Context, conn pgadmin.Conn, db string) error {
+	if err := conn.Exec(ctx, "drop database if exists "+quote.Ident(db)+" with (force)"); err != nil {
+		return fmt.Errorf("pgclone: drop %s: %w", db, err)
+	}
+
+	return nil
+}
+
+// stagingName is where target is built before it is renamed into place.
+func stagingName(target string) string {
+	return "pgswitch_staging_" + ident.ShortHash(target)
 }
 
 func (a Admin) connect(ctx context.Context) (pgadmin.Conn, func(), error) {
