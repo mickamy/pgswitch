@@ -117,7 +117,8 @@ func startServe(t *testing.T, flags ...string) (addr string, stderr *lockedBuffe
 	done := make(chan int, 1)
 	go func() {
 		std := cli.IO{In: strings.NewReader(""), Out: io.Discard, Err: stderr}
-		done <- cli.Run(ctx, append([]string{"serve", "-listen", addr}, flags...), std)
+		args := append([]string{"serve", "-listen", addr, "-control", ""}, flags...)
+		done <- cli.Run(ctx, args, std)
 	}()
 
 	require.Eventually(t, func() bool { return strings.Contains(stderr.String(), "serving") },

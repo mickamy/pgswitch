@@ -33,6 +33,12 @@ var commands = []command{
 		run:     runServe,
 		usage:   printServeUsage,
 	},
+	{
+		name:    "status",
+		summary: "Show live connections and where they were routed",
+		run:     runStatus,
+		usage:   printStatusUsage,
+	},
 }
 
 func Run(ctx context.Context, args []string, std IO) int {
