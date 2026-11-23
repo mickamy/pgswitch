@@ -3,8 +3,13 @@ package cli_test
 import (
 	"bytes"
 	"context"
+	"net"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/mickamy/pgswitch/internal/cli"
 	"github.com/mickamy/pgswitch/internal/exit"
@@ -39,35 +44,25 @@ func TestRun(t *testing.T) {
 			wantCode: exit.Usage,
 			wantErr:  `unknown command "bogus"`,
 		},
-		"hello with default name": {
-			args:     []string{"hello"},
+		"serve help": {
+			args:     []string{"serve", "-h"},
 			wantCode: exit.OK,
-			wantOut:  "Hello, world!\n",
+			wantOut:  "Usage: " + cli.Name + " serve",
 		},
-		"hello with name": {
-			args:     []string{"hello", "-name", "Go"},
-			wantCode: exit.OK,
-			wantOut:  "Hello, Go!\n",
-		},
-		"hello help": {
-			args:     []string{"hello", "-h"},
-			wantCode: exit.OK,
-			wantOut:  "Usage: " + cli.Name + " hello",
-		},
-		"hello with unknown flag": {
-			args:     []string{"hello", "-bogus"},
+		"serve with unknown flag": {
+			args:     []string{"serve", "-bogus"},
 			wantCode: exit.Usage,
 			wantErr:  "flag provided but not defined: -bogus",
 		},
-		"hello with unexpected argument": {
-			args:     []string{"hello", "extra"},
+		"serve with unexpected argument": {
+			args:     []string{"serve", "extra"},
 			wantCode: exit.Usage,
 			wantErr:  `unexpected argument "extra"`,
 		},
-		"hello with empty name": {
-			args:     []string{"hello", "-name", ""},
+		"serve with invalid listen address": {
+			args:     []string{"serve", "-listen", "not-an-address"},
 			wantCode: exit.Error,
-			wantErr:  cli.Name + ": name must not be empty\n",
+			wantErr:  cli.Name + ": ",
 		},
 	}
 
@@ -80,32 +75,54 @@ func TestRun(t *testing.T) {
 
 			code := cli.Run(t.Context(), tt.args, std)
 
-			if code != tt.wantCode {
-				t.Errorf("exit code: got %d, want %d", code, tt.wantCode)
-			}
-			if !strings.Contains(out.String(), tt.wantOut) {
-				t.Errorf("stdout: got %q, want it to contain %q", out.String(), tt.wantOut)
-			}
-			if !strings.Contains(errOut.String(), tt.wantErr) {
-				t.Errorf("stderr: got %q, want it to contain %q", errOut.String(), tt.wantErr)
-			}
+			assert.Equal(t, tt.wantCode, code)
+			assert.Contains(t, out.String(), tt.wantOut)
+			assert.Contains(t, errOut.String(), tt.wantErr)
 		})
 	}
 }
 
-func TestRunCanceled(t *testing.T) {
+func TestServeStopsOnCancel(t *testing.T) {
 	t.Parallel()
 
+	addr := freeAddr(t)
 	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan int, 1)
+	go func() {
+		var out, errOut bytes.Buffer
+		std := cli.IO{In: strings.NewReader(""), Out: &out, Err: &errOut}
+		done <- cli.Run(ctx, []string{"serve", "-listen", addr}, std)
+	}()
+
+	var d net.Dialer
+	require.Eventually(t, func() bool {
+		conn, err := d.DialContext(t.Context(), "tcp", addr)
+		if err != nil {
+			return false
+		}
+		_ = conn.Close()
+
+		return true
+	}, 5*time.Second, 10*time.Millisecond)
+
 	cancel()
 
-	var out, errOut bytes.Buffer
-	code := cli.Run(ctx, []string{"hello"}, cli.IO{In: strings.NewReader(""), Out: &out, Err: &errOut})
+	select {
+	case code := <-done:
+		assert.Equal(t, exit.OK, code)
+	case <-time.After(5 * time.Second):
+		require.FailNow(t, "serve did not stop")
+	}
+}
 
-	if code != exit.Error {
-		t.Errorf("exit code: got %d, want %d", code, exit.Error)
-	}
-	if !strings.Contains(errOut.String(), context.Canceled.Error()) {
-		t.Errorf("stderr: got %q, want it to mention %q", errOut.String(), context.Canceled)
-	}
+func freeAddr(t *testing.T) string {
+	t.Helper()
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := ln.Addr().String()
+	require.NoError(t, ln.Close())
+
+	return addr
 }
