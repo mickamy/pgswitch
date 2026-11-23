@@ -4,6 +4,7 @@ package e2e_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/mickamy/pgswitch/internal/clone"
 	"github.com/mickamy/pgswitch/internal/clone/pgclone"
+	"github.com/mickamy/pgswitch/internal/pgwire"
 )
 
 func TestPGCloneCopiesData(t *testing.T) {
@@ -69,7 +71,11 @@ func TestPGCloneQuotesRegardlessOfStringSettings(t *testing.T) {
 	password := uniqueName("pw")
 	require.NoError(t, admin.Exec(t.Context(), `create role "`+role+`" login superuser password '`+password+`'`))
 	t.Cleanup(func() { _ = admin.Exec(context.WithoutCancel(t.Context()), `drop role if exists "`+role+`"`) })
-	require.NoError(t, admin.Exec(t.Context(), `alter role "`+role+`" set standard_conforming_strings = off`))
+	err := admin.Exec(t.Context(), `alter role "`+role+`" set standard_conforming_strings = off`)
+	if serverErr := (pgwire.ServerError{}); errors.As(err, &serverErr) && serverErr.Code == "0A000" {
+		t.Skip("this server only supports standard-conforming strings")
+	}
+	require.NoError(t, err)
 
 	asRole := cfg
 	asRole.User = role
