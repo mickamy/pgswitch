@@ -62,7 +62,7 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - run: go test -race -tags e2e ./e2e/...
+      - run: go test -race -tags e2e ./...
         env:
           PGSWITCH_E2E_ADDR: 127.0.0.1:5432
           PGSWITCH_E2E_PASSWORD: postgres

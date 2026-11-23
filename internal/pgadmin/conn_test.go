@@ -121,8 +121,10 @@ func TestConnectTrustAndQuery(t *testing.T) {
 		startup := b.readStartup()
 		user, _ := startup.Param("user")
 		db, _ := startup.Param("database")
+		encoding, _ := startup.Param("client_encoding")
 		assert.Equal(t, "admin", user)
 		assert.Equal(t, "postgres", db)
+		assert.Equal(t, "UTF8", encoding)
 		b.auth(0)
 		b.ready()
 

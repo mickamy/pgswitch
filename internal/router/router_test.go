@@ -8,11 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/mickamy/pgswitch/internal/clone"
 	"github.com/mickamy/pgswitch/internal/peer"
 	"github.com/mickamy/pgswitch/internal/route"
 	"github.com/mickamy/pgswitch/internal/router"
@@ -26,6 +28,37 @@ var (
 )
 
 type lookupFunc = func(ctx context.Context, client, server netip.AddrPort) (peer.Process, error)
+
+type fakeCloner struct {
+	mu      sync.Mutex
+	ensured []string
+	waited  []string
+	err     error
+}
+
+var _ router.Cloner = (*fakeCloner)(nil)
+
+func (c *fakeCloner) Ensure(_ context.Context, source, target string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.ensured = append(c.ensured, source+"->"+target)
+
+	return c.err
+}
+
+func (c *fakeCloner) Wait(_ context.Context, db string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.waited = append(c.waited, db)
+
+	return nil
+}
+
+func newRouter(cloner router.Cloner, lookup lookupFunc) router.Router {
+	return router.NewWithLookup(slog.New(slog.DiscardHandler), cloner, lookup)
+}
 
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
@@ -113,7 +146,7 @@ func TestRoute(t *testing.T) {
 			t.Parallel()
 
 			cwd := tt.setup(t, newRepo(t))
-			r := router.NewWithLookup(slog.New(slog.DiscardHandler), lookupAt(cwd))
+			r := newRouter(&fakeCloner{}, lookupAt(cwd))
 
 			got, err := r.Route(t.Context(), client, server, database)
 			require.NoError(t, err)
@@ -127,12 +160,11 @@ func TestRouteLooksUpBothEnds(t *testing.T) {
 	t.Parallel()
 
 	var gotClient, gotServer netip.AddrPort
-	r := router.NewWithLookup(slog.New(slog.DiscardHandler),
-		func(_ context.Context, c, s netip.AddrPort) (peer.Process, error) {
-			gotClient, gotServer = c, s
+	r := newRouter(&fakeCloner{}, func(_ context.Context, c, s netip.AddrPort) (peer.Process, error) {
+		gotClient, gotServer = c, s
 
-			return peer.Process{}, peer.ErrNotFound
-		})
+		return peer.Process{}, peer.ErrNotFound
+	})
 
 	_, err := r.Route(t.Context(), client, server, database)
 	require.NoError(t, err)
@@ -164,12 +196,84 @@ func TestRouteUnattributed(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			r := router.NewWithLookup(slog.New(slog.DiscardHandler), tt.lookup)
+			r := newRouter(&fakeCloner{}, tt.lookup)
 
 			got, err := r.Route(t.Context(), tt.client, server, database)
 			require.NoError(t, err)
 
 			assert.Equal(t, database, got)
+		})
+	}
+}
+
+func TestRouteClones(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t)
+	runGit(t, repo, "switch", "-q", "-c", "feature/coupons")
+	onFeature := lookupAt(repo)
+	branchDB := route.PhysicalName(database, "feature/coupons", "main")
+
+	tests := map[string]struct {
+		lookup       lookupFunc
+		database     string
+		cloneErr     error
+		want         string
+		wantErr      bool
+		wantEnsured  []string
+		wantWaitedOn []string
+	}{
+		"clones the branch database from the requested one": {
+			lookup:       onFeature,
+			database:     database,
+			want:         branchDB,
+			wantEnsured:  []string{database + "->" + branchDB},
+			wantWaitedOn: []string{branchDB},
+		},
+		"the default branch clones nothing": {
+			lookup:       lookupAt(newRepo(t)),
+			database:     database,
+			want:         database,
+			wantWaitedOn: []string{database},
+		},
+		"shared databases are not routed": {
+			lookup:   onFeature,
+			database: "postgres",
+			want:     "postgres",
+		},
+		"a missing source passes the branch name through": {
+			lookup:       onFeature,
+			database:     database,
+			cloneErr:     clone.ErrSourceMissing,
+			want:         branchDB,
+			wantEnsured:  []string{database + "->" + branchDB},
+			wantWaitedOn: []string{branchDB},
+		},
+		"a failed clone fails the connection": {
+			lookup:      onFeature,
+			database:    database,
+			cloneErr:    clone.ErrSourceBusy,
+			wantErr:     true,
+			wantEnsured: []string{database + "->" + branchDB},
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			cloner := &fakeCloner{err: tt.cloneErr}
+
+			got, err := newRouter(cloner, tt.lookup).Route(t.Context(), client, server, tt.database)
+
+			if tt.wantErr {
+				require.ErrorIs(t, err, tt.cloneErr)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.want, got)
+			}
+			assert.Equal(t, tt.wantEnsured, cloner.ensured)
+			assert.Equal(t, tt.wantWaitedOn, cloner.waited)
 		})
 	}
 }
