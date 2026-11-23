@@ -65,9 +65,9 @@ func New(admin Admin, logger *slog.Logger) *Cloner {
 	}
 }
 
-// Ensure makes target exist, cloning it from source when it does not.
-// Concurrent calls for one target share a single clone.
-func (c *Cloner) Ensure(ctx context.Context, source, target string) error {
+// Ensure makes target exist, cloning it when it does not from the first of
+// sources that exists. Concurrent calls for one target share a single clone.
+func (c *Cloner) Ensure(ctx context.Context, target string, sources ...string) error {
 	exists, err := c.admin.Exists(ctx, target)
 	if err != nil {
 		return fmt.Errorf("clone: check %s: %w", target, err)
@@ -81,7 +81,7 @@ func (c *Cloner) Ensure(ctx context.Context, source, target string) error {
 	if !ok {
 		f = &flight{done: make(chan struct{})}
 		c.flights[target] = f
-		go c.fly(context.WithoutCancel(ctx), f, source, target)
+		go c.fly(context.WithoutCancel(ctx), f, target, sources)
 	}
 	c.mu.Unlock()
 
@@ -113,11 +113,11 @@ func (c *Cloner) Wait(ctx context.Context, db string) error {
 // fly runs one clone under its own timeout rather than the caller's
 // cancellation, so a client giving up does not abort the clone for the others
 // waiting on it.
-func (c *Cloner) fly(ctx context.Context, f *flight, source, target string) {
+func (c *Cloner) fly(ctx context.Context, f *flight, target string, sources []string) {
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	f.err = c.clone(ctx, source, target)
+	f.err = c.clone(ctx, target, sources)
 
 	c.mu.Lock()
 	delete(c.flights, target)
@@ -125,7 +125,7 @@ func (c *Cloner) fly(ctx context.Context, f *flight, source, target string) {
 	close(f.done)
 }
 
-func (c *Cloner) clone(ctx context.Context, source, target string) error {
+func (c *Cloner) clone(ctx context.Context, target string, sources []string) error {
 	// A flight that just finished may have created target after the caller
 	// checked.
 	exists, err := c.admin.Exists(ctx, target)
@@ -136,12 +136,9 @@ func (c *Cloner) clone(ctx context.Context, source, target string) error {
 		return nil
 	}
 
-	exists, err = c.admin.Exists(ctx, source)
+	source, err := c.firstExisting(ctx, sources)
 	if err != nil {
-		return fmt.Errorf("clone: check %s: %w", source, err)
-	}
-	if !exists {
-		return fmt.Errorf("%w: %s", ErrSourceMissing, source)
+		return err
 	}
 
 	release := c.hold(source)
@@ -174,6 +171,20 @@ func (c *Cloner) clone(ctx context.Context, source, target string) error {
 			return fmt.Errorf("clone: copy %s to %s: %w (%w)", source, target, err, ctx.Err())
 		}
 	}
+}
+
+func (c *Cloner) firstExisting(ctx context.Context, sources []string) (string, error) {
+	for _, source := range sources {
+		exists, err := c.admin.Exists(ctx, source)
+		if err != nil {
+			return "", fmt.Errorf("clone: check %s: %w", source, err)
+		}
+		if exists {
+			return source, nil
+		}
+	}
+
+	return "", fmt.Errorf("%w: none of %v", ErrSourceMissing, sources)
 }
 
 // hold makes Wait block for source until the returned func runs.

@@ -20,7 +20,7 @@ var shared = map[string]bool{"postgres": true, "template0": true, "template1": t
 
 // Cloner creates a branch database before the first connection to it.
 type Cloner interface {
-	Ensure(ctx context.Context, source, target string) error
+	Ensure(ctx context.Context, target string, sources ...string) error
 	Wait(ctx context.Context, db string) error
 }
 
@@ -57,7 +57,7 @@ func (r Router) Route(ctx context.Context, client, server net.Addr, database str
 
 	physical, owner := r.resolve(ctx, client, server, database)
 	if physical != database {
-		err := r.cloner.Ensure(ctx, database, physical)
+		err := r.cloner.Ensure(ctx, physical, database)
 		switch {
 		case errors.Is(err, clone.ErrSourceMissing):
 			r.logger.Warn("nothing to clone from", "database", database, "physical", physical)

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -39,11 +40,11 @@ type fakeCloner struct {
 
 var _ router.Cloner = (*fakeCloner)(nil)
 
-func (c *fakeCloner) Ensure(_ context.Context, source, target string) error {
+func (c *fakeCloner) Ensure(_ context.Context, target string, sources ...string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.ensured = append(c.ensured, source+"->"+target)
+	c.ensured = append(c.ensured, strings.Join(sources, ",")+"->"+target)
 
 	return c.err
 }
