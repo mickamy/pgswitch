@@ -7,7 +7,10 @@ import (
 	"syscall"
 )
 
-const errSharingViolation syscall.Errno = 32
+const (
+	errSharingViolation syscall.Errno = 32
+	errWSAConnRefused   syscall.Errno = 10061
+)
 
 // lock opens path without sharing, which Windows refuses to anyone else until
 // the handle is closed or the process ends. The returned func closes the
@@ -27,4 +30,10 @@ func lock(path string) (func(), error) {
 	}
 
 	return sync.OnceFunc(func() { _ = syscall.CloseHandle(h) }), nil
+}
+
+// isRefused reports a socket nobody listens on. Windows reports Winsock's
+// code, not the syscall.ECONNREFUSED Go defines for it.
+func isRefused(err error) bool {
+	return errors.Is(err, errWSAConnRefused) || errors.Is(err, syscall.ECONNREFUSED)
 }

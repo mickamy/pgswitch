@@ -42,8 +42,8 @@ var errLocked = errors.New("control: locked")
 
 // Listen opens the control socket at path. It first takes a lock on
 // path.lock, held until the listener is closed, so only one serve owns the
-// socket; holding it, any socket left at path is a stale one and is replaced.
-// Anything else at path is left alone.
+// socket. A socket left at path that refuses connections is replaced;
+// anything else there is left alone.
 func Listen(ctx context.Context, path string) (net.Listener, error) {
 	unlock, err := lock(path + ".lock")
 	if errors.Is(err, errLocked) {
@@ -53,7 +53,7 @@ func Listen(ctx context.Context, path string) (net.Listener, error) {
 		return nil, err
 	}
 
-	if err := removeStale(path); err != nil {
+	if err := removeStale(ctx, path); err != nil {
 		unlock()
 
 		return nil, err
@@ -84,9 +84,10 @@ func (l ownedListener) Close() error {
 	return err //nolint:wrapcheck // the listener's own error
 }
 
-// removeStale removes a socket left at path. It is called with the lock held,
-// so no serve is listening on it.
-func removeStale(path string) error {
+// removeStale removes a socket left at path by a serve that is gone. The
+// lock keeps out other serves, but a listener that does not take it (an older
+// pgswitch, another program) may still own the socket, so it is probed too.
+func removeStale(ctx context.Context, path string) error {
 	info, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -94,9 +95,22 @@ func removeStale(path string) error {
 	if err != nil {
 		return fmt.Errorf("control: %w", err)
 	}
-	if info.Mode().IsRegular() || info.IsDir() {
+	if info.Mode()&fs.ModeSocket == 0 {
 		return fmt.Errorf("control: %s exists and is not a socket", path)
 	}
+
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "unix", path)
+	switch {
+	case err == nil:
+		_ = conn.Close()
+
+		return fmt.Errorf("%w: %s", ErrRunning, path)
+	case !isRefused(err):
+		// Canceled, timed out or denied: no proof the socket is stale.
+		return fmt.Errorf("control: probe %s: %w", path, err)
+	}
+
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("control: %w", err)
 	}

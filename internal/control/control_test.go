@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -172,4 +173,36 @@ func TestReclosingKeepsTheNewOwner(t *testing.T) { //nolint:paralleltest // t.Ch
 
 	_, err = control.Listen(t.Context(), socket)
 	assert.ErrorIs(t, err, control.ErrRunning)
+}
+
+func TestListenLeavesAForeignListener(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
+	t.Chdir(t.TempDir())
+	var lc net.ListenConfig
+	foreign, err := lc.Listen(t.Context(), "unix", socket) // takes no lock, like an older serve
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = foreign.Close() })
+
+	_, err = control.Listen(t.Context(), socket)
+	require.ErrorIs(t, err, control.ErrRunning)
+
+	var d net.Dialer
+	conn, err := d.DialContext(t.Context(), "unix", socket)
+	require.NoError(t, err, "the foreign listener keeps its socket")
+	assert.NoError(t, conn.Close())
+}
+
+func TestListenLeavesASymlink(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	t.Chdir(t.TempDir())
+	require.NoError(t, os.WriteFile("target", []byte("keep me"), 0o600))
+	require.NoError(t, os.Symlink("target", socket))
+
+	_, err := control.Listen(t.Context(), socket)
+	require.Error(t, err)
+
+	info, err := os.Lstat(socket)
+	require.NoError(t, err)
+	assert.NotZero(t, info.Mode()&os.ModeSymlink, "the symlink is still there")
 }

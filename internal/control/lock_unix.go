@@ -33,3 +33,8 @@ func lock(path string) (func(), error) {
 		_ = f.Close()
 	}), nil
 }
+
+// isRefused reports a socket nobody listens on.
+func isRefused(err error) bool {
+	return errors.Is(err, syscall.ECONNREFUSED)
+}
