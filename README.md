@@ -22,7 +22,7 @@ Prebuilt binaries are on the [releases page](https://github.com/mickamy/pgswitch
 ## Usage
 
 ```sh
-pgswitch serve -upstream 127.0.0.1:5432 -branch feature/coupons
+pgswitch serve -upstream 127.0.0.1:5432
 pgswitch help
 pgswitch version
 ```

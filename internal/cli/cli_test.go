@@ -3,8 +3,10 @@ package cli_test
 import (
 	"bytes"
 	"context"
+	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -82,37 +84,94 @@ func TestRun(t *testing.T) {
 	}
 }
 
-func TestServeStopsOnCancel(t *testing.T) {
-	t.Parallel()
+// lockedBuffer lets the test read what serve writes from its own goroutine.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
 
-	addr := freeAddr(t)
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	n, _ := b.buf.Write(p) // always nil
+
+	return n, nil
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buf.String()
+}
+
+// startServe runs serve on a free port, waits until it accepts connections and
+// returns a func that stops it and reports the exit code.
+func startServe(t *testing.T, flags ...string) (addr string, stderr *lockedBuffer, stop func() int) {
+	t.Helper()
+
+	addr = freeAddr(t)
+	stderr = &lockedBuffer{}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan int, 1)
 	go func() {
-		var out, errOut bytes.Buffer
-		std := cli.IO{In: strings.NewReader(""), Out: &out, Err: &errOut}
-		done <- cli.Run(ctx, []string{"serve", "-listen", addr}, std)
+		std := cli.IO{In: strings.NewReader(""), Out: io.Discard, Err: stderr}
+		done <- cli.Run(ctx, append([]string{"serve", "-listen", addr}, flags...), std)
 	}()
 
-	var d net.Dialer
-	require.Eventually(t, func() bool {
-		conn, err := d.DialContext(t.Context(), "tcp", addr)
-		if err != nil {
-			return false
+	require.Eventually(t, func() bool { return strings.Contains(stderr.String(), "serving") },
+		5*time.Second, 10*time.Millisecond)
+
+	return addr, stderr, func() int {
+		cancel()
+		select {
+		case code := <-done:
+			return code
+		case <-time.After(5 * time.Second):
+			require.FailNow(t, "serve did not stop")
+
+			return 0
 		}
-		_ = conn.Close()
-
-		return true
-	}, 5*time.Second, 10*time.Millisecond)
-
-	cancel()
-
-	select {
-	case code := <-done:
-		assert.Equal(t, exit.OK, code)
-	case <-time.After(5 * time.Second):
-		require.FailNow(t, "serve did not stop")
 	}
+}
+
+func TestServeStopsOnCancel(t *testing.T) {
+	t.Parallel()
+
+	_, _, stop := startServe(t)
+
+	assert.Equal(t, exit.OK, stop())
+}
+
+func TestServeDebug(t *testing.T) {
+	t.Parallel()
+
+	addr, stderr, stop := startServe(t, "-debug")
+	closeBeforeStartup(t, addr)
+
+	assert.Eventually(t, func() bool { return strings.Contains(stderr.String(), "closed before startup") },
+		5*time.Second, 10*time.Millisecond)
+	assert.Equal(t, exit.OK, stop())
+}
+
+func TestServeHidesDebugByDefault(t *testing.T) {
+	t.Parallel()
+
+	addr, stderr, stop := startServe(t)
+	closeBeforeStartup(t, addr)
+	require.Equal(t, exit.OK, stop())
+
+	assert.NotContains(t, stderr.String(), "level=DEBUG")
+}
+
+func closeBeforeStartup(t *testing.T, addr string) {
+	t.Helper()
+
+	var d net.Dialer
+	conn, err := d.DialContext(t.Context(), "tcp", addr)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
 }
 
 func freeAddr(t *testing.T) string {
