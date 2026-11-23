@@ -21,6 +21,7 @@ func runServe(ctx context.Context, args []string, std IO) int {
 	fs := newFlagSet("serve", std.Err, printServeUsage)
 	listen := fs.String("listen", defaultListen, "address to accept clients on")
 	upstream := fs.String("upstream", defaultUpstream, "address of the Postgres server")
+	debug := fs.Bool("debug", false, "log how each connection is attributed")
 	if err := fs.Parse(args); err != nil {
 		return exit.Usage
 	}
@@ -30,7 +31,11 @@ func runServe(ctx context.Context, args []string, std IO) int {
 		return exit.Usage
 	}
 
-	logger := slog.New(slog.NewTextHandler(std.Err, nil))
+	level := slog.LevelInfo
+	if *debug {
+		level = slog.LevelDebug
+	}
+	logger := slog.New(slog.NewTextHandler(std.Err, &slog.HandlerOptions{Level: level}))
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", *listen)
@@ -52,4 +57,5 @@ func printServeUsage(w io.Writer) {
 	fmt.Fprint(w, "Flags:\n")
 	fmt.Fprintf(w, "  -listen ADDR    address to accept clients on (default %q)\n", defaultListen)
 	fmt.Fprintf(w, "  -upstream ADDR  address of the Postgres server (default %q)\n", defaultUpstream)
+	fmt.Fprint(w, "  -debug          log how each connection is attributed\n")
 }
