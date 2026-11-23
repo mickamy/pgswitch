@@ -149,3 +149,18 @@ func TestLogFailsOnOutputErrors(t *testing.T) { //nolint:paralleltest // t.Chdir
 		}
 	}
 }
+
+func TestLogKeepsAnEventOnOneLine(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
+	t.Chdir(t.TempDir())
+	log := events.New()
+	log.Add(events.Event{Time: at, Level: "INFO", Message: "routed", Attrs: map[string]string{
+		"lf": "app\nsecond", "cr": "app\rsecond", "tab": "a\tb", "plain": "shop_test", "empty": "",
+	}})
+	serveEvents(t, log)
+
+	code, out, _ := runCLI(t, "log", "-control", socket)
+
+	require.Equal(t, exit.OK, code)
+	want := `14:02:11  routed  cr="app\rsecond"  empty=""  lf="app\nsecond"  plain=shop_test  tab="a\tb"`
+	assert.Equal(t, want+"\n", out)
+}

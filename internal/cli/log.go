@@ -7,7 +7,9 @@ import (
 	"io"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/mickamy/pgswitch/internal/control"
 	"github.com/mickamy/pgswitch/internal/events"
@@ -87,9 +89,14 @@ func formatEvent(e events.Event) string {
 	return strings.Join(parts, "  ")
 }
 
+// quoteIfNeeded quotes a value that would otherwise blur the line: empty, or
+// with spaces, control characters such as newlines, quotes or equal signs.
 func quoteIfNeeded(v string) string {
-	if v == "" || strings.ContainsAny(v, " \t\"=") {
-		return fmt.Sprintf("%q", v)
+	needs := v == "" || strings.ContainsFunc(v, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r) || r == '"' || r == '='
+	})
+	if needs {
+		return strconv.Quote(v)
 	}
 
 	return v
