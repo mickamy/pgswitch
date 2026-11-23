@@ -8,8 +8,8 @@ import (
 	"github.com/mickamy/pgswitch/internal/git/ref"
 )
 
-// switches remembers, per repository, the branch each branch was switched to
-// from: for git switch -c, the branch a new one grew out of.
+// switches remembers, per repository, the branch each new branch was first
+// switched to from: for git switch -c, the branch it grew out of.
 type switches struct {
 	mu   sync.Mutex
 	from map[switchKey]string
@@ -24,7 +24,9 @@ func newSwitches() *switches {
 	return &switches{from: make(map[switchKey]string)}
 }
 
-func (s *switches) record(commonDir, from, to string) {
+// recordFirst keeps the first switch seen into to; later checkouts of it do
+// not say where it came from.
+func (s *switches) recordFirst(commonDir, from, to string) {
 	if from == "" || to == "" {
 		return
 	}
@@ -32,7 +34,10 @@ func (s *switches) record(commonDir, from, to string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.from[switchKey{commonDir: commonDir, branch: to}] = from
+	key := switchKey{commonDir: commonDir, branch: to}
+	if _, ok := s.from[key]; !ok {
+		s.from[key] = from
+	}
 }
 
 func (s *switches) previous(commonDir, branch string) (string, bool) {
@@ -53,7 +58,7 @@ func (r Router) parentBranches(wt git.Worktree, branch, defaultBranch string) []
 	if err != nil {
 		r.logger.Debug("read branch tips", "repo", wt.CommonDir, "err", err)
 	}
-	from, commit, created, err := ref.CreatedFrom(wt.CommonDir, branch)
+	creation, created, err := ref.CreatedFrom(wt.CommonDir, branch)
 	if err != nil {
 		r.logger.Debug("read reflog", "branch", branch, "err", err)
 	}
@@ -64,23 +69,28 @@ func (r Router) parentBranches(wt git.Worktree, branch, defaultBranch string) []
 			parents = append(parents, b)
 		}
 	}
+	guess := func(b string) {
+		if b != defaultBranch {
+			add(b)
+		}
+	}
 
-	if _, isBranch := tips[from]; created && isBranch {
-		add(from)
+	if _, isBranch := tips[creation.From]; created && isBranch {
+		add(creation.From)
 	}
 	if prev, ok := r.switches.previous(wt.CommonDir, branch); ok {
-		add(prev)
+		guess(prev)
 	}
 	if created {
 		var sameTip []string
 		for b, tip := range tips {
-			if tip == commit {
+			if tip == creation.Commit {
 				sameTip = append(sameTip, b)
 			}
 		}
 		slices.Sort(sameTip)
 		for _, b := range sameTip {
-			add(b)
+			guess(b)
 		}
 	}
 

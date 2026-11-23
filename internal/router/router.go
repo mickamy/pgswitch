@@ -7,9 +7,11 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"time"
 
 	"github.com/mickamy/pgswitch/internal/clone"
 	"github.com/mickamy/pgswitch/internal/git"
+	"github.com/mickamy/pgswitch/internal/git/ref"
 	"github.com/mickamy/pgswitch/internal/peer"
 	"github.com/mickamy/pgswitch/internal/proxy"
 	"github.com/mickamy/pgswitch/internal/route"
@@ -48,10 +50,19 @@ func New(logger *slog.Logger, cloner Cloner, watcher Watcher) Router {
 	return Router{logger: logger, cloner: cloner, watcher: watcher, lookup: peer.Lookup, switches: newSwitches()}
 }
 
+// creationWindow is how recently a branch must have been created for a switch
+// into it to count as its creation. The watcher polls far more often.
+const creationWindow = 5 * time.Second
+
 // Switched records that a worktree of the repository at commonDir went from
-// one branch to another, so a database for to can be cloned from from's.
+// one branch to another. Only a switch into a branch just created says where
+// it came from, so a database for to can be cloned from from's.
 func (r Router) Switched(commonDir, from, to string) {
-	r.switches.record(commonDir, from, to)
+	creation, ok, err := ref.CreatedFrom(commonDir, to)
+	if err != nil || !ok || time.Since(creation.At) > creationWindow {
+		return
+	}
+	r.switches.recordFirst(commonDir, from, to)
 }
 
 // attribution is what resolve learned about a connection.

@@ -8,7 +8,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -122,35 +124,46 @@ func BranchTips(commonDir string) (map[string]string, error) {
 
 const createdFromPrefix = "branch: Created from "
 
-// CreatedFrom reads the first reflog entry of branch, written when it was
-// created: the ref it was created from (a branch, HEAD, a remote branch or a
-// commit, as typed) and the commit it started at. ok is false without that
-// entry.
-func CreatedFrom(commonDir, branch string) (from, commit string, ok bool, err error) {
+// Creation is a branch's first reflog entry, written when it was created.
+type Creation struct {
+	// From is the ref it was created from, as typed: a branch, HEAD, a remote
+	// branch or a commit.
+	From string
+	// Commit is the commit it started at.
+	Commit string
+	At     time.Time
+}
+
+// CreatedFrom reads how branch was created. ok is false without that entry.
+func CreatedFrom(commonDir, branch string) (Creation, bool, error) {
 	f, err := os.Open(filepath.Join(commonDir, "logs", filepath.FromSlash(Heads(branch))))
 	if errors.Is(err, fs.ErrNotExist) {
-		return "", "", false, nil
+		return Creation{}, false, nil
 	}
 	if err != nil {
-		return "", "", false, fmt.Errorf("ref: %w", err)
+		return Creation{}, false, fmt.Errorf("ref: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
 	sc := bufio.NewScanner(f)
 	if !sc.Scan() {
-		return "", "", false, nil
+		return Creation{}, false, nil
 	}
 
-	// <old> <new> <committer> <time> <tz>\t<message>
+	// <old> <new> <name> <<email>> <unix time> <tz>\t<message>
 	entry, message, hasMessage := strings.Cut(sc.Text(), "\t")
 	from, created := strings.CutPrefix(message, createdFromPrefix)
 	fields := strings.Fields(entry)
-	if !hasMessage || !created || len(fields) < 2 {
-		return "", "", false, nil
+	if !hasMessage || !created || len(fields) < 4 {
+		return Creation{}, false, nil
+	}
+	unix, err := strconv.ParseInt(fields[len(fields)-2], 10, 64)
+	if err != nil {
+		return Creation{}, false, nil
 	}
 	if b, isBranch := Branch(from); isBranch {
 		from = b
 	}
 
-	return from, fields[1], true, nil
+	return Creation{From: from, Commit: fields[1], At: time.Unix(unix, 0)}, true, nil
 }

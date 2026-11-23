@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -177,13 +178,14 @@ func TestCreatedFrom(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			from, commit, ok, err := ref.CreatedFrom(commonDir, tt.branch)
+			c, ok, err := ref.CreatedFrom(commonDir, tt.branch)
 			require.NoError(t, err)
 
 			assert.Equal(t, tt.wantOK, ok)
-			assert.Equal(t, tt.wantFrom, from)
+			assert.Equal(t, tt.wantFrom, c.From)
 			if tt.wantOK {
-				assert.Equal(t, tip, commit, "the commit it started at, not where it is now")
+				assert.Equal(t, tip, c.Commit, "the commit it started at, not where it is now")
+				assert.WithinDuration(t, time.Now(), c.At, time.Minute)
 			}
 		})
 	}

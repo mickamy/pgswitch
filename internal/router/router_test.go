@@ -79,9 +79,15 @@ func newRouter(cloner router.Cloner, lookup lookupFunc) router.Router {
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 
+	runGitWith(t, dir, nil, args...)
+}
+
+func runGitWith(t *testing.T, dir string, env []string, args ...string) {
+	t.Helper()
+
 	cmd := exec.CommandContext(t.Context(), "git", args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(append(os.Environ(), env...),
 		"GIT_CONFIG_GLOBAL="+os.DevNull,
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
@@ -410,6 +416,69 @@ func TestRouteClonesFromTheParentBranch(t *testing.T) {
 			require.NoError(t, err)
 
 			assert.Equal(t, db(branch), got.Database)
+			assert.Equal(t, []string{strings.Join(tt.wantSources, ",") + "->" + db(branch)}, cloner.ensured)
+		})
+	}
+}
+
+func TestRouteParentProvenance(t *testing.T) {
+	t.Parallel()
+
+	db := func(branch string) string { return route.PhysicalName(database, branch, "main") }
+	longAgo := []string{"GIT_COMMITTER_DATE=2001-01-01T00:00:00Z"}
+
+	// Each setup starts on feature/a, one commit ahead of main, with sibling
+	// pointing at main and feature/b one commit ahead of feature/a.
+	tests := map[string]struct {
+		setup       func(t *testing.T, repo string, r router.Router) (branch string)
+		wantSources []string
+	}{
+		"a later checkout does not replace the creation switch": {
+			setup: func(t *testing.T, repo string, r router.Router) string {
+				commonDir := filepath.Join(repo, ".git")
+				runGit(t, repo, "switch", "-q", "-c", "child")
+				r.Switched(commonDir, "feature/a", "child")
+				runGit(t, repo, "switch", "-q", "feature/b")
+				r.Switched(commonDir, "child", "feature/b")
+				runGit(t, repo, "switch", "-q", "child")
+				r.Switched(commonDir, "feature/b", "child")
+
+				return "child"
+			},
+			wantSources: []string{db("feature/a"), database},
+		},
+		"a checkout of a branch created long ago is not its creation": {
+			setup: func(t *testing.T, repo string, r router.Router) string {
+				runGitWith(t, repo, longAgo, "branch", "old", "feature/a")
+				runGit(t, repo, "switch", "-q", "feature/b")
+				runGit(t, repo, "switch", "-q", "old")
+				r.Switched(filepath.Join(repo, ".git"), "feature/b", "old")
+
+				return "old"
+			},
+			wantSources: []string{db("feature/a"), database},
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			repo := newRepo(t)
+			runGit(t, repo, "branch", "sibling")
+			runGit(t, repo, "switch", "-q", "-c", "feature/a")
+			runGit(t, repo, "commit", "-q", "--allow-empty", "-m", "on a")
+			runGit(t, repo, "switch", "-q", "-c", "feature/b")
+			runGit(t, repo, "commit", "-q", "--allow-empty", "-m", "on b")
+			runGit(t, repo, "switch", "-q", "feature/a")
+
+			cloner := &fakeCloner{}
+			r := router.NewWithLookup(slog.New(slog.DiscardHandler), cloner, &fakeWatcher{}, lookupAt(repo))
+			branch := tt.setup(t, repo, r)
+
+			_, err := r.Route(t.Context(), client, server, database)
+			require.NoError(t, err)
+
 			assert.Equal(t, []string{strings.Join(tt.wantSources, ",") + "->" + db(branch)}, cloner.ensured)
 		})
 	}
