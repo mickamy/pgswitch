@@ -21,17 +21,24 @@ const (
 
 var errTooManyNegotiations = errors.New("too many SSL/GSS negotiation requests")
 
-// Router picks the physical database for a connection. client and server are
-// the two ends of the accepted connection.
-type Router interface {
-	Route(ctx context.Context, client, server net.Addr, database string) (string, error)
+// Route is where a connection goes. Owner, when not empty, names what the
+// connection was attributed to; Sever closes every connection of an owner.
+type Route struct {
+	Database string
+	Owner    string
 }
 
-type RouterFunc func(ctx context.Context, client, server net.Addr, database string) (string, error)
+// Router picks the route for a connection. client and server are the two ends
+// of the accepted connection.
+type Router interface {
+	Route(ctx context.Context, client, server net.Addr, database string) (Route, error)
+}
+
+type RouterFunc func(ctx context.Context, client, server net.Addr, database string) (Route, error)
 
 var _ Router = RouterFunc(nil)
 
-func (f RouterFunc) Route(ctx context.Context, client, server net.Addr, database string) (string, error) {
+func (f RouterFunc) Route(ctx context.Context, client, server net.Addr, database string) (Route, error) {
 	return f(ctx, client, server, database)
 }
 
@@ -39,10 +46,22 @@ type Proxy struct {
 	upstream string
 	router   Router
 	logger   *slog.Logger
+	conns    *registry
 }
 
 func New(upstream string, router Router, logger *slog.Logger) Proxy {
-	return Proxy{upstream: upstream, router: router, logger: logger}
+	return Proxy{upstream: upstream, router: router, logger: logger, conns: newRegistry()}
+}
+
+// Sever closes every connection routed for owner and reports how many. Pools
+// reconnect and are routed afresh.
+func (p Proxy) Sever(owner string) int {
+	n := p.conns.closeAll(owner)
+	if n > 0 {
+		p.logger.Info("severed connections", "owner", owner, "connections", n)
+	}
+
+	return n
 }
 
 // Serve accepts connections on ln until ctx is canceled, then closes every
@@ -99,11 +118,16 @@ func (p Proxy) handle(ctx context.Context, client net.Conn) {
 	}
 
 	requested := startup.Database()
-	physical, err := p.router.Route(ctx, client.RemoteAddr(), client.LocalAddr(), requested)
+	route, err := p.router.Route(ctx, client.RemoteAddr(), client.LocalAddr(), requested)
 	if err != nil {
 		reject(client, logger, pgwire.CodeConnectionRejection, "pgswitch: route "+requested+": "+err.Error())
 
 		return
+	}
+	// Registered before the upstream connection, so a switch from here on
+	// severs it.
+	if route.Owner != "" {
+		defer p.conns.add(route.Owner, client)()
 	}
 
 	var d net.Dialer
@@ -115,12 +139,12 @@ func (p Proxy) handle(ctx context.Context, client net.Conn) {
 	}
 	defer closeOnDone(ctx, upstream)()
 
-	if _, err := upstream.Write(startup.WithParam("database", physical).Packet().Bytes()); err != nil {
+	if _, err := upstream.Write(startup.WithParam("database", route.Database).Packet().Bytes()); err != nil {
 		logger.Warn("forward startup", "err", err)
 
 		return
 	}
-	logger.Info("routed", "database", requested, "physical", physical)
+	logger.Info("routed", "database", requested, "physical", route.Database, "owner", route.Owner)
 
 	splice(client, upstream)
 }

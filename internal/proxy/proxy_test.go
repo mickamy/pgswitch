@@ -59,13 +59,17 @@ func startUpstream(t *testing.T) (string, <-chan pgwire.Packet) {
 func startProxy(t *testing.T, upstream string, router proxy.Router) (string, context.CancelFunc) {
 	t.Helper()
 
+	return serveProxy(t, proxy.New(upstream, router, slog.New(slog.DiscardHandler)))
+}
+
+func serveProxy(t *testing.T, p proxy.Proxy) (string, context.CancelFunc) {
+	t.Helper()
+
 	ln := listen(t)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
-	go func() {
-		done <- proxy.New(upstream, router, slog.New(slog.DiscardHandler)).Serve(ctx, ln)
-	}()
+	go func() { done <- p.Serve(ctx, ln) }()
 	t.Cleanup(func() {
 		cancel()
 		assert.NoError(t, <-done)
@@ -91,8 +95,8 @@ func startupPacket(params ...pgwire.Param) []byte {
 }
 
 func fixedRouter(physical string) proxy.Router {
-	return proxy.RouterFunc(func(context.Context, net.Addr, net.Addr, string) (string, error) {
-		return physical, nil
+	return proxy.RouterFunc(func(context.Context, net.Addr, net.Addr, string) (proxy.Route, error) {
+		return proxy.Route{Database: physical}, nil
 	})
 }
 
@@ -120,10 +124,10 @@ func TestProxyRoutesStartup(t *testing.T) {
 		database string
 	}
 	calls := make(chan routed, 1)
-	router := proxy.RouterFunc(func(_ context.Context, client, server net.Addr, database string) (string, error) {
+	router := proxy.RouterFunc(func(_ context.Context, client, server net.Addr, database string) (proxy.Route, error) {
 		calls <- routed{client: client, server: server, database: database}
 
-		return database + "__fix_tax", nil
+		return proxy.Route{Database: database + "__fix_tax"}, nil
 	})
 	addr, _ := startProxy(t, upstream, router)
 
@@ -252,8 +256,8 @@ func TestProxyRejects(t *testing.T) {
 
 	upstream, _ := startUpstream(t)
 	unreachable := closedAddr(t)
-	failingRouter := proxy.RouterFunc(func(context.Context, net.Addr, net.Addr, string) (string, error) {
-		return "", errors.New("no repository")
+	failingRouter := proxy.RouterFunc(func(context.Context, net.Addr, net.Addr, string) (proxy.Route, error) {
+		return proxy.Route{}, errors.New("no repository")
 	})
 	validStartup := startupPacket(pgwire.Param{Name: "user", Value: "alice"})
 
@@ -359,4 +363,47 @@ func listen(t *testing.T) net.Listener {
 	require.NoError(t, err)
 
 	return ln
+}
+
+func TestSeverClosesTheOwnersConnections(t *testing.T) {
+	t.Parallel()
+
+	upstream, received := startUpstream(t)
+	byDatabase := proxy.RouterFunc(func(_ context.Context, _, _ net.Addr, database string) (proxy.Route, error) {
+		owners := map[string]string{"on_fix_tax": "/src/shop-fix-tax", "on_main": "/src/shop"}
+
+		return proxy.Route{Database: database, Owner: owners[database]}, nil
+	})
+	p := proxy.New(upstream, byDatabase, slog.New(slog.DiscardHandler))
+	addr, _ := serveProxy(t, p)
+
+	open := func(database string) net.Conn {
+		conn := dial(t, addr)
+		_, err := conn.Write(startupPacket(
+			pgwire.Param{Name: "user", Value: "alice"},
+			pgwire.Param{Name: "database", Value: database},
+		))
+		require.NoError(t, err)
+		receive(t, received)
+
+		return conn
+	}
+	severed1, severed2 := open("on_fix_tax"), open("on_fix_tax")
+	kept, unowned := open("on_main"), open("unowned")
+
+	assert.Equal(t, 0, p.Sever("/src/elsewhere"))
+	assert.Equal(t, 2, p.Sever("/src/shop-fix-tax"))
+	assert.Equal(t, 0, p.Sever("/src/shop-fix-tax"), "already severed")
+
+	for _, conn := range []net.Conn{severed1, severed2} {
+		_, err := conn.Read(make([]byte, 1))
+		require.ErrorIs(t, err, io.EOF)
+	}
+	for _, conn := range []net.Conn{kept, unowned} {
+		_, err := conn.Write([]byte("ping"))
+		require.NoError(t, err)
+		echo := make([]byte, 4)
+		_, err = io.ReadFull(conn, echo)
+		require.NoError(t, err, "other connections stay up")
+	}
 }
