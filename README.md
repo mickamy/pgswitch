@@ -31,6 +31,7 @@ pgswitch version
 
 ```sh
 make test   # go test -race ./...
+make e2e    # end-to-end tests; needs PGSWITCH_E2E_ADDR (and PGSWITCH_E2E_PASSWORD) pointing at a Postgres
 make lint   # golangci-lint run
 make build  # bin/pgswitch
 ```
