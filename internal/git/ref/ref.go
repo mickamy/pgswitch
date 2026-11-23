@@ -170,38 +170,58 @@ func CreatedFrom(commonDir, branch string) (Creation, bool, error) {
 
 const renamedPrefix = "Branch: renamed "
 
-// RenamedFrom reports the name branch had before git branch -m, when its
-// latest reflog entry is that rename.
-func RenamedFrom(commonDir, branch string) (string, bool, error) {
+// Rename is a reflog entry written by git branch -m.
+type Rename struct {
+	From string
+	At   time.Time
+}
+
+// RenamedFrom finds the latest rename of some branch to branch in its reflog,
+// however many entries, such as commits, followed it. Callers decide whether
+// it is recent enough to matter.
+func RenamedFrom(commonDir, branch string) (Rename, bool, error) {
 	f, err := os.Open(filepath.Join(commonDir, "logs", filepath.FromSlash(Heads(branch))))
 	if errors.Is(err, fs.ErrNotExist) {
-		return "", false, nil
+		return Rename{}, false, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("ref: %w", err)
+		return Rename{}, false, fmt.Errorf("ref: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
-	var last string
+	var latest Rename
+	found := false
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
-		last = sc.Text()
+		if r, ok := parseRename(sc.Text(), branch); ok {
+			latest, found = r, true
+		}
 	}
 	if err := sc.Err(); err != nil {
-		return "", false, fmt.Errorf("ref: %w", err)
+		return Rename{}, false, fmt.Errorf("ref: %w", err)
 	}
 
-	// ...\tBranch: renamed refs/heads/<old> to refs/heads/<new>
-	_, message, _ := strings.Cut(last, "\t")
+	return latest, found, nil
+}
+
+// parseRename reads "<old> <new> <name> <<email>> <unix> <tz>\tBranch:
+// renamed refs/heads/<from> to refs/heads/<branch>".
+func parseRename(line, branch string) (Rename, bool) {
+	entry, message, _ := strings.Cut(line, "\t")
 	rename, ok := strings.CutPrefix(message, renamedPrefix)
 	if !ok {
-		return "", false, nil
+		return Rename{}, false
 	}
 	oldRef, newRef, ok := strings.Cut(rename, " to ")
-	old, isBranch := Branch(oldRef)
-	if !ok || !isBranch || newRef != Heads(branch) {
-		return "", false, nil
+	from, isBranch := Branch(oldRef)
+	fields := strings.Fields(entry)
+	if !ok || !isBranch || newRef != Heads(branch) || len(fields) < 4 {
+		return Rename{}, false
+	}
+	unix, err := strconv.ParseInt(fields[len(fields)-2], 10, 64)
+	if err != nil {
+		return Rename{}, false
 	}
 
-	return old, true, nil
+	return Rename{From: from, At: time.Unix(unix, 0)}, true
 }

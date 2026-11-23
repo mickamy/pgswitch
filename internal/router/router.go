@@ -60,9 +60,10 @@ func New(logger *slog.Logger, cloner Cloner, watcher Watcher) Router {
 	}
 }
 
-// creationWindow is how recently a branch must have been created for a switch
-// into it to count as its creation. The watcher polls far more often.
-const creationWindow = 5 * time.Second
+// recentWindow is how recently a branch must have been created or renamed for
+// a switch into it to count as that creation or rename. The watcher polls far
+// more often.
+const recentWindow = 5 * time.Second
 
 // Switched learns from a worktree of the repository at commonDir going from
 // one branch to another. When git branch -m renamed from to to, the branch's
@@ -70,14 +71,15 @@ const creationWindow = 5 * time.Second
 // created says where it came from, so a database for to can be cloned from
 // from's.
 func (r Router) Switched(ctx context.Context, commonDir, from, to string) {
-	if old, renamed, err := ref.RenamedFrom(commonDir, to); err == nil && renamed && old == from {
+	rename, renamed, err := ref.RenamedFrom(commonDir, to)
+	if err == nil && renamed && rename.From == from && time.Since(rename.At) <= recentWindow {
 		r.followRename(ctx, commonDir, from, to)
 
 		return
 	}
 
 	creation, ok, err := ref.CreatedFrom(commonDir, to)
-	if err != nil || !ok || time.Since(creation.At) > creationWindow {
+	if err != nil || !ok || time.Since(creation.At) > recentWindow {
 		return
 	}
 	r.switches.recordFirst(commonDir, from, to)

@@ -531,6 +531,28 @@ func TestSwitchedFollowsABranchRename(t *testing.T) {
 				db("shop_test", "feature/old") + "->" + db("shop_test", "feature/new"),
 			},
 		},
+		"a commit right after the rename": {
+			rename: func(t *testing.T, repo string) (string, string) {
+				runGit(t, repo, "branch", "-m", "feature/new")
+				runGit(t, repo, "commit", "-q", "--allow-empty", "-m", "before the watcher looks")
+
+				return "feature/old", "feature/new"
+			},
+			wantRenamed: []string{
+				db("shop_development", "feature/old") + "->" + db("shop_development", "feature/new"),
+				db("shop_test", "feature/old") + "->" + db("shop_test", "feature/new"),
+			},
+		},
+		"a rename long ago is not this switch": {
+			rename: func(t *testing.T, repo string) (string, string) {
+				runGitWith(t, repo, []string{"GIT_COMMITTER_DATE=2001-01-01T00:00:00Z"},
+					"branch", "-m", "feature/new")
+				runGit(t, repo, "switch", "-q", "-c", "feature/old")
+				runGit(t, repo, "switch", "-q", "feature/new")
+
+				return "feature/old", "feature/new"
+			},
+		},
 		"a plain switch renames nothing": {
 			rename: func(t *testing.T, repo string) (string, string) {
 				runGit(t, repo, "switch", "-q", "-c", "feature/other")
