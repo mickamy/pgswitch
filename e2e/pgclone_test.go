@@ -146,3 +146,53 @@ func TestPGCloneKeepsDatabaseSettingsAndPrivileges(t *testing.T) {
 	}
 	assert.Equal(t, acl(source), acl(target))
 }
+
+// TestPGCloneAsNonSuperuser clones as a role that owns the source and can
+// create databases and end sessions, but is not a superuser.
+func TestPGCloneAsNonSuperuser(t *testing.T) {
+	t.Parallel()
+
+	cfg := adminConfig(t)
+	admin := connect(t, cfg)
+
+	role := uniqueName("pgswitch_e2e_owner")
+	password := uniqueName("pw")
+	require.NoError(t, admin.Exec(t.Context(), `create role "`+role+`" login createdb password '`+password+`'`))
+	// Registered first so it runs last, after the databases the role owns are gone.
+	t.Cleanup(func() { _ = admin.Exec(context.WithoutCancel(t.Context()), `drop role if exists "`+role+`"`) })
+	require.NoError(t, admin.Exec(t.Context(), `grant pg_signal_backend to "`+role+`"`))
+
+	source := uniqueName("pgswitch_e2e")
+	require.NoError(t, admin.Exec(t.Context(), `create database "`+source+`" owner "`+role+`"`))
+	dropOnCleanup(t, admin, source)
+
+	asRole := cfg
+	asRole.User = role
+	asRole.Password = password
+	a := pgclone.New(asRole)
+
+	plain := source + "__plain"
+	dropOnCleanup(t, admin, plain)
+	require.NoError(t, a.Copy(t.Context(), source, plain), "a database without settings")
+
+	require.NoError(t, admin.Exec(t.Context(), `alter database "`+source+`" set search_path = app, public`))
+	withSettings := source + "__settings"
+	dropOnCleanup(t, admin, withSettings)
+	require.NoError(t, a.Copy(t.Context(), source, withSettings))
+	onCopy := cfg
+	onCopy.Database = withSettings
+	assert.Equal(t, "app, public", queryValue(t, connect(t, onCopy), "show search_path"))
+
+	// Setting it for another role needs more than owning the database.
+	require.NoError(t, admin.Exec(t.Context(), `alter role "`+cfg.User+`" in database "`+source+`" set work_mem = '8MB'`))
+	denied := source + "__denied"
+	dropOnCleanup(t, admin, denied)
+	err := a.Copy(t.Context(), source, denied)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "work_mem")
+	assert.Contains(t, err.Error(), "role "+cfg.User)
+	assert.Equal(t, "0", queryValue(t, admin, "select count(*) from pg_database"+
+		" where datname = '"+denied+"' or (datname like 'pgswitch_staging_%'"+
+		" and datdba = (select oid from pg_roles where rolname = '"+role+"'))"),
+		"neither the target nor the staging database is left")
+}

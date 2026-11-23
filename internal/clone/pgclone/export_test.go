@@ -6,3 +6,8 @@ func WithStagingNames(a Admin, next func() string) Admin {
 
 	return a
 }
+
+var (
+	SettingStatement = settingStatement
+	SplitList        = splitList
+)

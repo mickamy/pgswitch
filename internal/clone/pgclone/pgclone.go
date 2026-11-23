@@ -18,9 +18,8 @@ const (
 	// MinVersionMajor is the oldest Postgres pgswitch supports.
 	MinVersionMajor = 15
 
-	codeObjectInUse           = "55006"
-	codeDuplicateDatabase     = "42P04"
-	codeInsufficientPrivilege = "42501"
+	codeObjectInUse       = "55006"
+	codeDuplicateDatabase = "42P04"
 
 	stagingPrefix   = "pgswitch_staging_"
 	stagingAttempts = 3
@@ -196,25 +195,6 @@ func copyPrivileges(ctx context.Context, conn pgadmin.Conn, source, staging, own
 		if err := conn.Exec(ctx, stmt); err != nil {
 			return fmt.Errorf("pgclone: copy privileges of %s: %w", source, err)
 		}
-	}
-
-	return nil
-}
-
-// copySettings duplicates source's ALTER DATABASE ... SET and ALTER ROLE ... IN
-// DATABASE ... SET entries. Copying the catalog rows keeps the values exactly,
-// including list settings such as search_path; it needs a superuser.
-func copySettings(ctx context.Context, conn pgadmin.Conn, source, staging string) error {
-	err := conn.Exec(ctx, "insert into pg_db_role_setting (setdatabase, setrole, setconfig)"+
-		" select (select oid from pg_database where datname = "+quote.Literal(staging)+"), s.setrole, s.setconfig"+
-		" from pg_db_role_setting s join pg_database d on d.oid = s.setdatabase"+
-		" where d.datname = "+quote.Literal(source))
-	var serverErr pgwire.ServerError
-	if errors.As(err, &serverErr) && serverErr.Code == codeInsufficientPrivilege {
-		return fmt.Errorf("pgclone: copying database settings needs a superuser admin role: %w", err)
-	}
-	if err != nil {
-		return fmt.Errorf("pgclone: copy settings of %s: %w", source, err)
 	}
 
 	return nil
