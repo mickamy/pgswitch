@@ -173,12 +173,17 @@ func (p Proxy) forwardCancel(ctx context.Context, pkt pgwire.Packet, log *slog.L
 
 		return
 	}
-	defer func() { _ = upstream.Close() }()
+	defer closeOnDone(ctx, upstream)()
 
 	if _, err := upstream.Write(pkt.Bytes()); err != nil {
 		log.Warn("forward cancel", "err", err)
 
 		return
+	}
+	// The server closes the connection once it has processed the cancel. Like
+	// libpq, wait for that so a late cancel cannot hit the client's next query.
+	if _, err := io.Copy(io.Discard, upstream); err != nil && ctx.Err() == nil {
+		log.Debug("wait for cancel", "err", err)
 	}
 	log.Debug("forwarded cancel")
 }

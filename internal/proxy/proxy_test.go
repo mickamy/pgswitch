@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"testing"
 	"time"
 
@@ -172,6 +173,73 @@ func TestProxyForwardsCancel(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, cancel, receive(t, received))
+
+	_, err = conn.Read(make([]byte, 1))
+	assert.ErrorIs(t, err, io.EOF)
+}
+
+// startHoldingUpstream runs a fake server that keeps the first connection open
+// after reading its packet, until release is closed.
+func startHoldingUpstream(t *testing.T, release <-chan struct{}) (string, <-chan pgwire.Packet) {
+	t.Helper()
+
+	ln := listen(t)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	received := make(chan pgwire.Packet, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		pkt, err := pgwire.ReadPacket(conn)
+		if err != nil {
+			return
+		}
+		received <- pkt
+		<-release
+	}()
+
+	return ln.Addr().String(), received
+}
+
+func TestProxyCancelWaitsForUpstreamToClose(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	upstream, received := startHoldingUpstream(t, release)
+	addr, _ := startProxy(t, upstream, fixedRouter("unused"))
+
+	conn := dial(t, addr)
+	_, err := conn.Write(pgwire.Packet{Code: codeCancelRequest, Body: []byte{0, 0, 0, 42, 1, 2, 3, 4}}.Bytes())
+	require.NoError(t, err)
+	receive(t, received)
+
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(100*time.Millisecond)))
+	_, err = conn.Read(make([]byte, 1))
+	require.ErrorIs(t, err, os.ErrDeadlineExceeded, "closed before the upstream finished the cancel")
+
+	close(release)
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+	_, err = conn.Read(make([]byte, 1))
+	assert.ErrorIs(t, err, io.EOF)
+}
+
+func TestServeStopsWhileWaitingForCancel(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	upstream, received := startHoldingUpstream(t, release)
+	addr, stop := startProxy(t, upstream, fixedRouter("unused"))
+
+	conn := dial(t, addr)
+	_, err := conn.Write(pgwire.Packet{Code: codeCancelRequest, Body: []byte{0, 0, 0, 42, 1, 2, 3, 4}}.Bytes())
+	require.NoError(t, err)
+	receive(t, received)
+
+	stop()
 
 	_, err = conn.Read(make([]byte, 1))
 	assert.ErrorIs(t, err, io.EOF)
