@@ -64,6 +64,7 @@ func serve(t *testing.T, script func(b backend)) string {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
 
+	accepted := make(chan net.Conn, 1)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -71,10 +72,24 @@ func serve(t *testing.T, script func(b backend)) string {
 		if err != nil {
 			return
 		}
+		accepted <- conn
 		defer func() { _ = conn.Close() }()
 		script(backend{t: t, conn: conn})
 	}()
-	t.Cleanup(func() { <-done })
+	// A script still waiting on a client that failed is cut off.
+	t.Cleanup(func() {
+		select {
+		case <-done:
+			return
+		case <-time.After(time.Second):
+		}
+		select {
+		case conn := <-accepted:
+			_ = conn.Close()
+		default:
+		}
+		<-done
+	})
 
 	return ln.Addr().String()
 }
@@ -244,4 +259,57 @@ func TestQueryCanceled(t *testing.T) {
 	_, err = conn.Query(ctx, "select pg_sleep(10)")
 
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+// fireInterrupt cancels a watch on conn and gives its callback time to run, as
+// when a context ends just as the operation completes.
+func fireInterrupt(t *testing.T, conn pgadmin.Conn) func(synced bool) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	release := pgadmin.Watch(ctx, conn)
+	cancel()
+	time.Sleep(20 * time.Millisecond)
+
+	return release
+}
+
+func TestLateInterruptOnSyncedConnection(t *testing.T) {
+	t.Parallel()
+
+	addr := serve(t, func(b backend) {
+		b.readStartup()
+		b.auth(0)
+		b.ready()
+		b.receive(pgwire.MsgQuery)
+		b.send(pgwire.MsgCommandComplete, []byte("SELECT 1\x00"))
+		b.send(pgwire.MsgReadyForQuery, []byte{'I'})
+		b.receive(pgwire.MsgTerminate)
+	})
+	conn, err := pgadmin.Connect(t.Context(), pgadmin.Config{Addr: addr, User: "admin"})
+	require.NoError(t, err)
+
+	fireInterrupt(t, conn)(true)
+
+	require.NoError(t, conn.Exec(t.Context(), "select 1"), "a late interrupt must not break the next query")
+	require.NoError(t, conn.Close())
+}
+
+func TestInterruptOnUnsyncedConnectionClosesIt(t *testing.T) {
+	t.Parallel()
+
+	addr := serve(t, func(b backend) {
+		b.readStartup()
+		b.auth(0)
+		b.ready()
+		// A reply the client never read, left over from the interrupted query.
+		b.send(pgwire.MsgReadyForQuery, []byte{'I'})
+	})
+	conn, err := pgadmin.Connect(t.Context(), pgadmin.Config{Addr: addr, User: "admin"})
+	require.NoError(t, err)
+
+	fireInterrupt(t, conn)(false)
+
+	require.Error(t, conn.Exec(t.Context(), "select 1"), "the connection must not be reused")
+	assert.ErrorIs(t, conn.Close(), net.ErrClosed, "the connection was closed")
 }

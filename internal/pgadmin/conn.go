@@ -74,7 +74,9 @@ func (c Conn) ServerVersionMajor() int {
 
 // Query runs query and returns its rows. A NULL column is not Valid.
 func (c Conn) Query(ctx context.Context, query string) ([][]sql.NullString, error) {
-	defer c.watch(ctx)()
+	synced := false
+	release := c.watch(ctx)
+	defer func() { release(synced) }()
 
 	if err := c.send(pgwire.MsgQuery, append([]byte(query), 0)); err != nil {
 		return nil, err
@@ -97,6 +99,7 @@ func (c Conn) Query(ctx context.Context, query string) ([][]sql.NullString, erro
 		case pgwire.MsgErrorResponse:
 			queryErr = serverError(msg.Body)
 		case pgwire.MsgReadyForQuery:
+			synced = true
 			if queryErr != nil {
 				return nil, queryErr
 			}
@@ -123,7 +126,9 @@ func (c Conn) Close() error {
 
 // startup authenticates and returns the server's major version.
 func (c Conn) startup(ctx context.Context, cfg Config) (int, error) {
-	defer c.watch(ctx)()
+	synced := false
+	release := c.watch(ctx)
+	defer func() { release(synced) }()
 
 	db := cfg.Database
 	if db == "" {
@@ -159,6 +164,8 @@ func (c Conn) startup(ctx context.Context, cfg Config) (int, error) {
 				versionMajor = parseVersionMajor(value)
 			}
 		case pgwire.MsgReadyForQuery:
+			synced = true
+
 			return versionMajor, nil
 		}
 	}
@@ -231,11 +238,28 @@ func (c Conn) receive(ctx context.Context) (pgwire.Message, error) {
 	return msg, nil
 }
 
-// watch interrupts I/O on c when ctx ends, until the returned func runs.
-func (c Conn) watch(ctx context.Context) func() {
-	stop := context.AfterFunc(ctx, func() { _ = c.conn.SetDeadline(time.Now()) })
+// watch interrupts I/O on c when ctx ends. Call the returned func when the
+// operation is over, with synced telling whether it read through
+// ReadyForQuery. If the interrupt already fired, a synced connection gets its
+// deadline back and an unsynced one is closed: unread replies may remain.
+func (c Conn) watch(ctx context.Context) func(synced bool) {
+	fired := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(fired)
+		_ = c.conn.SetDeadline(time.Now())
+	})
 
-	return func() { stop() }
+	return func(synced bool) {
+		if stop() {
+			return
+		}
+		<-fired
+		if synced {
+			_ = c.conn.SetDeadline(time.Time{})
+		} else {
+			_ = c.conn.Close()
+		}
+	}
 }
 
 func serverError(body []byte) error {
