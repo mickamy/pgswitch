@@ -89,11 +89,21 @@ func (w *Watcher) scan(commonDir string) {
 		return
 	}
 
+	w.mu.Lock()
+	prev := w.heads[commonDir]
+	w.mu.Unlock()
+
 	current := make(map[string]string, len(wts))
 	for _, wt := range wts {
 		branch, ok, err := wt.Branch()
 		if err != nil {
+			// HEAD can be briefly unreadable while git replaces it (on
+			// Windows, a sharing violation). Keep the last value rather than
+			// forget the worktree, which would miss the switch under way.
 			w.logger.Debug("read HEAD", "worktree", wt.Root, "err", err)
+			if from, seen := prev[wt.Root]; seen {
+				current[wt.Root] = from
+			}
 
 			continue
 		}
@@ -104,7 +114,6 @@ func (w *Watcher) scan(commonDir string) {
 	}
 
 	w.mu.Lock()
-	prev := w.heads[commonDir]
 	w.heads[commonDir] = current
 	w.mu.Unlock()
 

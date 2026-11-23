@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -120,4 +121,27 @@ func TestWatcherPicksUpNewWorktrees(t *testing.T) {
 
 	runGit(t, linked, "switch", "-q", "-c", "fix-tax-2")
 	assert.Equal(t, change(linked, "fix-tax", "fix-tax-2"), next(t, changes))
+}
+
+func TestWatcherKeepsTrackWhileHEADIsUnreadable(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs file permissions that deny reading")
+	}
+
+	repo := newRepo(t)
+	runGit(t, repo, "branch", "other")
+	head := filepath.Join(repo, ".git", "HEAD")
+	changes := start(t, repo)
+
+	require.NoError(t, os.Chmod(head, 0))
+	assertQuiet(t, changes)
+	require.NoError(t, os.Chmod(head, 0o200)) // still unreadable
+	require.NoError(t, os.WriteFile(head, []byte("ref: refs/heads/other\n"), 0o200))
+	assertQuiet(t, changes)
+	require.NoError(t, os.Chmod(head, 0o600))
+
+	assert.Equal(t, watch.Change{CommonDir: filepath.Join(repo, ".git"), Worktree: repo, From: "main", To: "other"},
+		next(t, changes))
 }
