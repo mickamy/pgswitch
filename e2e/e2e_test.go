@@ -16,6 +16,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/mickamy/pgswitch/internal/clone"
+	"github.com/mickamy/pgswitch/internal/clone/pgclone"
 	"github.com/mickamy/pgswitch/internal/pgadmin"
 	"github.com/mickamy/pgswitch/internal/proxy"
 	"github.com/mickamy/pgswitch/internal/route"
@@ -132,7 +134,7 @@ func runGit(t *testing.T, dir string, args ...string) {
 	require.NoError(t, err, "git %v: %s", args, out)
 }
 
-func startProxy(t *testing.T, upstream string) string {
+func startProxy(t *testing.T, admin pgadmin.Config) string {
 	t.Helper()
 
 	var lc net.ListenConfig
@@ -140,8 +142,9 @@ func startProxy(t *testing.T, upstream string) string {
 	require.NoError(t, err)
 
 	logger := slog.New(slog.DiscardHandler)
+	r := router.New(logger, clone.New(pgclone.New(admin), logger))
 	done := make(chan error, 1)
-	go func() { done <- proxy.New(upstream, router.New(logger), logger).Serve(t.Context(), ln) }()
+	go func() { done <- proxy.New(admin.Addr, r, logger).Serve(t.Context(), ln) }()
 	t.Cleanup(func() { assert.NoError(t, <-done) })
 
 	return ln.Addr().String()
@@ -164,7 +167,7 @@ func TestProxyRoutesByBranch(t *testing.T) { //nolint:paralleltest // t.Chdir ch
 	createDatabase(t, admin, db)
 	createDatabase(t, admin, branchDB)
 
-	addr := startProxy(t, cfg.Addr)
+	addr := startProxy(t, cfg)
 	t.Chdir(repo)
 
 	viaProxy := cfg
@@ -177,4 +180,45 @@ func TestProxyRoutesByBranch(t *testing.T) { //nolint:paralleltest // t.Chdir ch
 	runGit(t, repo, "switch", "-q", "main")
 	onMain := connect(t, viaProxy)
 	assert.Equal(t, db, queryValue(t, onMain, "select current_database()"))
+}
+
+// TestProxyClonesOnFirstConnection connects on a new branch whose database
+// does not exist yet: the proxy clones it from the default branch's.
+func TestProxyClonesOnFirstConnection(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
+	cfg := adminConfig(t)
+	admin := connect(t, cfg)
+
+	repo, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	runGit(t, repo, "init", "-q", "-b", "main")
+	runGit(t, repo, "commit", "-q", "--allow-empty", "-m", "init")
+	runGit(t, repo, "switch", "-q", "-c", "fix-tax")
+
+	db := uniqueName("pgswitch_e2e")
+	branchDB := route.PhysicalName(db, "fix-tax", "main")
+	createDatabase(t, admin, db)
+	dropOnCleanup(t, admin, branchDB)
+
+	onMain := cfg
+	onMain.Database = db
+	seed := connect(t, onMain)
+	require.NoError(t, seed.Exec(t.Context(), "create table coupons (code text)"))
+	require.NoError(t, seed.Exec(t.Context(), "insert into coupons values ('WELCOME')"))
+
+	addr := startProxy(t, cfg)
+	t.Chdir(repo)
+
+	viaProxy := cfg
+	viaProxy.Addr = addr
+	viaProxy.Database = db
+	onBranch := connect(t, viaProxy)
+
+	assert.Equal(t, branchDB, queryValue(t, onBranch, "select current_database()"))
+	assert.Equal(t, "WELCOME", queryValue(t, onBranch, "select code from coupons"))
+	require.NoError(t, onBranch.Exec(t.Context(), "insert into coupons values ('BRANCH_ONLY')"))
+	assert.Equal(t, "1", queryValue(t, admin, "select 1"), "the admin connection is untouched")
+	require.Error(t, seed.Exec(t.Context(), "select 1"), "the session on the source was interrupted to clone")
+
+	onSource := connect(t, onMain)
+	assert.Equal(t, "1", queryValue(t, onSource, "select count(*) from coupons"), "the source is unchanged")
 }
