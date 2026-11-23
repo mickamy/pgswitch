@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -85,17 +86,21 @@ func TestWatcherReportsSwitches(t *testing.T) {
 	t.Parallel()
 
 	repo := newRepo(t)
+	commonDir := filepath.Join(repo, ".git")
+	change := func(worktree, from, to string) watch.Change {
+		return watch.Change{CommonDir: commonDir, Worktree: worktree, From: from, To: to}
+	}
 	changes := start(t, repo)
 	assertQuiet(t, changes)
 
 	runGit(t, repo, "switch", "-q", "-c", "feature/coupons")
-	assert.Equal(t, watch.Change{Worktree: repo, From: "main", To: "feature/coupons"}, next(t, changes))
+	assert.Equal(t, change(repo, "main", "feature/coupons"), next(t, changes))
 
 	runGit(t, repo, "switch", "-q", "--detach")
-	assert.Equal(t, watch.Change{Worktree: repo, From: "feature/coupons", To: ""}, next(t, changes))
+	assert.Equal(t, change(repo, "feature/coupons", ""), next(t, changes))
 
 	runGit(t, repo, "switch", "-q", "main")
-	assert.Equal(t, watch.Change{Worktree: repo, From: "", To: "main"}, next(t, changes))
+	assert.Equal(t, change(repo, "", "main"), next(t, changes))
 	assertQuiet(t, changes)
 }
 
@@ -103,6 +108,10 @@ func TestWatcherPicksUpNewWorktrees(t *testing.T) {
 	t.Parallel()
 
 	repo := newRepo(t)
+	commonDir := filepath.Join(repo, ".git")
+	change := func(worktree, from, to string) watch.Change {
+		return watch.Change{CommonDir: commonDir, Worktree: worktree, From: from, To: to}
+	}
 	changes := start(t, repo)
 
 	linked := repo + "-fix-tax"
@@ -111,5 +120,28 @@ func TestWatcherPicksUpNewWorktrees(t *testing.T) {
 	assertQuiet(t, changes)
 
 	runGit(t, linked, "switch", "-q", "-c", "fix-tax-2")
-	assert.Equal(t, watch.Change{Worktree: linked, From: "fix-tax", To: "fix-tax-2"}, next(t, changes))
+	assert.Equal(t, change(linked, "fix-tax", "fix-tax-2"), next(t, changes))
+}
+
+func TestWatcherKeepsTrackWhileHEADIsUnreadable(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs file permissions that deny reading")
+	}
+
+	repo := newRepo(t)
+	runGit(t, repo, "branch", "other")
+	head := filepath.Join(repo, ".git", "HEAD")
+	changes := start(t, repo)
+
+	require.NoError(t, os.Chmod(head, 0))
+	assertQuiet(t, changes)
+	require.NoError(t, os.Chmod(head, 0o200)) // still unreadable
+	require.NoError(t, os.WriteFile(head, []byte("ref: refs/heads/other\n"), 0o200))
+	assertQuiet(t, changes)
+	require.NoError(t, os.Chmod(head, 0o600))
+
+	assert.Equal(t, watch.Change{CommonDir: filepath.Join(repo, ".git"), Worktree: repo, From: "main", To: "other"},
+		next(t, changes))
 }

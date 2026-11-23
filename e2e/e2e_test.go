@@ -144,9 +144,16 @@ func startProxy(t *testing.T, admin pgadmin.Config) string {
 	require.NoError(t, err)
 
 	logger := slog.New(slog.DiscardHandler)
-	var p proxy.Proxy
-	w := watch.New(logger, func(c watch.Change) { p.Sever(c.Worktree) })
-	p = proxy.New(admin.Addr, router.New(logger, clone.New(pgclone.New(admin), logger), w), logger)
+	var (
+		r router.Router
+		p proxy.Proxy
+	)
+	w := watch.New(logger, func(c watch.Change) {
+		r.Switched(c.CommonDir, c.From, c.To)
+		p.Sever(c.Worktree)
+	})
+	r = router.New(logger, clone.New(pgclone.New(admin), logger), w)
+	p = proxy.New(admin.Addr, r, logger)
 	go w.Run(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- p.Serve(t.Context(), ln) }()
@@ -259,4 +266,44 @@ func TestProxySeversOnSwitch(t *testing.T) { //nolint:paralleltest // t.Chdir ch
 		5*time.Second, 50*time.Millisecond, "the connection on main is severed")
 	onBranch := connect(t, viaProxy)
 	assert.Equal(t, branchDB, queryValue(t, onBranch, "select current_database()"))
+}
+
+// TestProxyClonesFromTheParentBranch branches off a feature branch with
+// git switch -c: the new branch's database starts from the feature branch's,
+// not main's.
+func TestProxyClonesFromTheParentBranch(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
+	cfg := adminConfig(t)
+	admin := connect(t, cfg)
+
+	repo, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	runGit(t, repo, "init", "-q", "-b", "main")
+	runGit(t, repo, "commit", "-q", "--allow-empty", "-m", "init")
+	runGit(t, repo, "switch", "-q", "-c", "feature/coupons")
+
+	db := uniqueName("pgswitch_e2e")
+	parentDB := route.PhysicalName(db, "feature/coupons", "main")
+	childDB := route.PhysicalName(db, "feature/coupons-ui", "main")
+	createDatabase(t, admin, db)
+	dropOnCleanup(t, admin, parentDB)
+	dropOnCleanup(t, admin, childDB)
+
+	addr := startProxy(t, cfg)
+	t.Chdir(repo)
+
+	viaProxy := cfg
+	viaProxy.Addr = addr
+	viaProxy.Database = db
+	onParent := connect(t, viaProxy)
+	require.Equal(t, parentDB, queryValue(t, onParent, "select current_database()"))
+	require.NoError(t, onParent.Exec(t.Context(), "create table coupons (code text)"))
+	require.NoError(t, onParent.Exec(t.Context(), "insert into coupons values ('FROM_PARENT')"))
+
+	runGit(t, repo, "switch", "-q", "-c", "feature/coupons-ui")
+	require.Eventually(t, func() bool { return onParent.Exec(t.Context(), "select 1") != nil },
+		5*time.Second, 50*time.Millisecond, "the switch is observed")
+
+	onChild := connect(t, viaProxy)
+	assert.Equal(t, childDB, queryValue(t, onChild, "select current_database()"))
+	assert.Equal(t, "FROM_PARENT", queryValue(t, onChild, "select code from coupons"))
 }

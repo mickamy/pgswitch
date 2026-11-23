@@ -2,8 +2,11 @@ package ref_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -95,6 +98,95 @@ func TestExists(t *testing.T) {
 			require.NoError(t, err)
 
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func runGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+
+	cmd := exec.CommandContext(t.Context(), "git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git %v: %s", args, out)
+
+	return strings.TrimSpace(string(out))
+}
+
+func newRepo(t *testing.T) string {
+	t.Helper()
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+
+	runGit(t, dir, "init", "-q", "-b", "main")
+	runGit(t, dir, "commit", "-q", "--allow-empty", "-m", "init")
+
+	return dir
+}
+
+func TestBranchTips(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t)
+	first := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "branch", "feature/coupons")
+	runGit(t, repo, "pack-refs", "--all")
+	runGit(t, repo, "commit", "-q", "--allow-empty", "-m", "second")
+	second := runGit(t, repo, "rev-parse", "HEAD")
+
+	tips, err := ref.BranchTips(filepath.Join(repo, ".git"))
+	require.NoError(t, err)
+
+	assert.Equal(t, map[string]string{"main": second, "feature/coupons": first}, tips,
+		"a loose ref wins over its packed entry")
+}
+
+func TestCreatedFrom(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t)
+	commonDir := filepath.Join(repo, ".git")
+	tip := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "branch", "named", "main")
+	runGit(t, repo, "branch", "full", "refs/heads/main")
+	runGit(t, repo, "switch", "-q", "-c", "from-head")
+	runGit(t, repo, "commit", "-q", "--allow-empty", "-m", "on from-head")
+
+	tests := map[string]struct {
+		branch   string
+		wantFrom string
+		wantOK   bool
+	}{
+		"named start point": {branch: "named", wantFrom: "main", wantOK: true},
+		"full ref":          {branch: "full", wantFrom: "main", wantOK: true},
+		"from HEAD":         {branch: "from-head", wantFrom: "HEAD", wantOK: true},
+		"initial branch":    {branch: "main", wantOK: false},
+		"no such branch":    {branch: "missing", wantOK: false},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			c, ok, err := ref.CreatedFrom(commonDir, tt.branch)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.wantOK, ok)
+			assert.Equal(t, tt.wantFrom, c.From)
+			if tt.wantOK {
+				assert.Equal(t, tip, c.Commit, "the commit it started at, not where it is now")
+				assert.WithinDuration(t, time.Now(), c.At, time.Minute)
+			}
 		})
 	}
 }

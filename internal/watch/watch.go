@@ -14,9 +14,10 @@ const defaultInterval = 500 * time.Millisecond
 // Change is a worktree whose checked-out branch changed. An empty branch is a
 // detached HEAD.
 type Change struct {
-	Worktree string
-	From     string
-	To       string
+	CommonDir string
+	Worktree  string
+	From      string
+	To        string
 }
 
 // Watcher polls the HEAD of every worktree of the repositories it was given.
@@ -88,11 +89,21 @@ func (w *Watcher) scan(commonDir string) {
 		return
 	}
 
+	w.mu.Lock()
+	prev := w.heads[commonDir]
+	w.mu.Unlock()
+
 	current := make(map[string]string, len(wts))
 	for _, wt := range wts {
 		branch, ok, err := wt.Branch()
 		if err != nil {
+			// HEAD can be briefly unreadable while git replaces it (on
+			// Windows, a sharing violation). Keep the last value rather than
+			// forget the worktree, which would miss the switch under way.
 			w.logger.Debug("read HEAD", "worktree", wt.Root, "err", err)
+			if from, seen := prev[wt.Root]; seen {
+				current[wt.Root] = from
+			}
 
 			continue
 		}
@@ -103,13 +114,12 @@ func (w *Watcher) scan(commonDir string) {
 	}
 
 	w.mu.Lock()
-	prev := w.heads[commonDir]
 	w.heads[commonDir] = current
 	w.mu.Unlock()
 
 	for root, branch := range current {
 		if from, seen := prev[root]; seen && from != branch {
-			w.onChange(Change{Worktree: root, From: from, To: branch})
+			w.onChange(Change{CommonDir: commonDir, Worktree: root, From: from, To: branch})
 		}
 	}
 }
