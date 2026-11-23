@@ -57,8 +57,22 @@ func (c *fakeCloner) Wait(_ context.Context, db string) error {
 	return nil
 }
 
+type fakeWatcher struct {
+	mu    sync.Mutex
+	added []string
+}
+
+var _ router.Watcher = (*fakeWatcher)(nil)
+
+func (w *fakeWatcher) Add(commonDir string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.added = append(w.added, commonDir)
+}
+
 func newRouter(cloner router.Cloner, lookup lookupFunc) router.Router {
-	return router.NewWithLookup(slog.New(slog.DiscardHandler), cloner, lookup)
+	return router.NewWithLookup(slog.New(slog.DiscardHandler), cloner, &fakeWatcher{}, lookup)
 }
 
 func runGit(t *testing.T, dir string, args ...string) {
@@ -277,6 +291,38 @@ func TestRouteClones(t *testing.T) {
 			}
 			assert.Equal(t, tt.wantEnsured, cloner.ensured)
 			assert.Equal(t, tt.wantWaitedOn, cloner.waited)
+		})
+	}
+}
+
+func TestRouteWatchesTheRepository(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t)
+	linked := repo + "-fix-tax"
+	runGit(t, repo, "worktree", "add", "-q", "-b", "fix-tax", linked)
+	t.Cleanup(func() { _ = os.RemoveAll(linked) })
+
+	tests := map[string]struct {
+		cwd  string
+		want []string
+	}{
+		"main worktree":   {cwd: repo, want: []string{filepath.Join(repo, ".git")}},
+		"linked worktree": {cwd: linked, want: []string{filepath.Join(repo, ".git")}},
+		"outside":         {cwd: t.TempDir(), want: nil},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			w := &fakeWatcher{}
+			r := router.NewWithLookup(slog.New(slog.DiscardHandler), &fakeCloner{}, w, lookupAt(tt.cwd))
+
+			_, err := r.Route(t.Context(), client, server, database)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.want, w.added)
 		})
 	}
 }

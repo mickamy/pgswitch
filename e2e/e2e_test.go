@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -22,6 +23,7 @@ import (
 	"github.com/mickamy/pgswitch/internal/proxy"
 	"github.com/mickamy/pgswitch/internal/route"
 	"github.com/mickamy/pgswitch/internal/router"
+	"github.com/mickamy/pgswitch/internal/watch"
 )
 
 func adminConfig(t *testing.T) pgadmin.Config {
@@ -142,9 +144,12 @@ func startProxy(t *testing.T, admin pgadmin.Config) string {
 	require.NoError(t, err)
 
 	logger := slog.New(slog.DiscardHandler)
-	r := router.New(logger, clone.New(pgclone.New(admin), logger))
+	var p proxy.Proxy
+	w := watch.New(logger, func(c watch.Change) { p.Sever(c.Worktree) })
+	p = proxy.New(admin.Addr, router.New(logger, clone.New(pgclone.New(admin), logger), w), logger)
+	go w.Run(t.Context())
 	done := make(chan error, 1)
-	go func() { done <- proxy.New(admin.Addr, r, logger).Serve(t.Context(), ln) }()
+	go func() { done <- p.Serve(t.Context(), ln) }()
 	t.Cleanup(func() { assert.NoError(t, <-done) })
 
 	return ln.Addr().String()
@@ -221,4 +226,37 @@ func TestProxyClonesOnFirstConnection(t *testing.T) { //nolint:paralleltest // t
 
 	onSource := connect(t, onMain)
 	assert.Equal(t, "1", queryValue(t, onSource, "select count(*) from coupons"), "the source is unchanged")
+}
+
+// TestProxySeversOnSwitch keeps a connection open across git switch: the
+// proxy drops it, and the next connection lands on the new branch's database.
+func TestProxySeversOnSwitch(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
+	cfg := adminConfig(t)
+	admin := connect(t, cfg)
+
+	repo, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	runGit(t, repo, "init", "-q", "-b", "main")
+	runGit(t, repo, "commit", "-q", "--allow-empty", "-m", "init")
+
+	db := uniqueName("pgswitch_e2e")
+	branchDB := route.PhysicalName(db, "feature/coupons", "main")
+	createDatabase(t, admin, db)
+	dropOnCleanup(t, admin, branchDB)
+
+	addr := startProxy(t, cfg)
+	t.Chdir(repo)
+
+	viaProxy := cfg
+	viaProxy.Addr = addr
+	viaProxy.Database = db
+	onMain := connect(t, viaProxy)
+	require.Equal(t, db, queryValue(t, onMain, "select current_database()"))
+
+	runGit(t, repo, "switch", "-q", "-c", "feature/coupons")
+
+	assert.Eventually(t, func() bool { return onMain.Exec(t.Context(), "select 1") != nil },
+		5*time.Second, 50*time.Millisecond, "the connection on main is severed")
+	onBranch := connect(t, viaProxy)
+	assert.Equal(t, branchDB, queryValue(t, onBranch, "select current_database()"))
 }

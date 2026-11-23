@@ -24,20 +24,27 @@ type Cloner interface {
 	Wait(ctx context.Context, db string) error
 }
 
+// Watcher learns the repositories connections come from, to notice when
+// their worktrees switch branches.
+type Watcher interface {
+	Add(commonDir string)
+}
+
 // Router routes a connection to the database of the branch checked out where
 // the connecting process runs.
 type Router struct {
-	logger *slog.Logger
-	cloner Cloner
-	lookup lookupFunc
+	logger  *slog.Logger
+	cloner  Cloner
+	watcher Watcher
+	lookup  lookupFunc
 }
 
 type lookupFunc func(ctx context.Context, client, server netip.AddrPort) (peer.Process, error)
 
 var _ proxy.Router = Router{}
 
-func New(logger *slog.Logger, cloner Cloner) Router {
-	return Router{logger: logger, cloner: cloner, lookup: peer.Lookup}
+func New(logger *slog.Logger, cloner Cloner, watcher Watcher) Router {
+	return Router{logger: logger, cloner: cloner, watcher: watcher, lookup: peer.Lookup}
 }
 
 // Route clones a branch database from the default branch's on first use. It
@@ -98,6 +105,7 @@ func (r Router) resolve(ctx context.Context, client, server net.Addr, database s
 
 		return database, ""
 	}
+	r.watcher.Add(wt.CommonDir)
 
 	branch, ok, err := wt.Branch()
 	if err != nil {
