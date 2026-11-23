@@ -12,6 +12,7 @@ import (
 const (
 	defaultTimeout       = 30 * time.Second
 	defaultRetryInterval = 200 * time.Millisecond
+	ensureAttempts       = 3
 )
 
 var (
@@ -29,6 +30,9 @@ type Admin interface {
 	// Copy creates target from source. It returns ErrSourceBusy while source
 	// has sessions.
 	Copy(ctx context.Context, source, target string) error
+	// Rename renames from to to. It returns ErrSourceBusy while from has
+	// sessions.
+	Rename(ctx context.Context, from, to string) error
 }
 
 // Cloner creates branch databases on demand. While it copies a source, new
@@ -67,30 +71,32 @@ func New(admin Admin, logger *slog.Logger) *Cloner {
 
 // Ensure makes target exist, cloning it when it does not from the first of
 // sources that exists. Concurrent calls for one target share a single clone.
+// The flight it joins may be a rename that found nothing to move, so it checks
+// again after each one.
 func (c *Cloner) Ensure(ctx context.Context, target string, sources ...string) error {
-	exists, err := c.admin.Exists(ctx, target)
-	if err != nil {
-		return fmt.Errorf("clone: check %s: %w", target, err)
-	}
-	if exists {
-		return nil
+	for range ensureAttempts {
+		exists, err := c.admin.Exists(ctx, target)
+		if err != nil {
+			return fmt.Errorf("clone: check %s: %w", target, err)
+		}
+		if exists {
+			return nil
+		}
+
+		err = c.join(ctx, target, func(ctx context.Context) error { return c.clone(ctx, target, sources) })
+		if err != nil {
+			return err
+		}
 	}
 
-	c.mu.Lock()
-	f, ok := c.flights[target]
-	if !ok {
-		f = &flight{done: make(chan struct{})}
-		c.flights[target] = f
-		go c.fly(context.WithoutCancel(ctx), f, target, sources)
-	}
-	c.mu.Unlock()
+	return fmt.Errorf("clone: %s is still missing after %d attempts", target, ensureAttempts)
+}
 
-	select {
-	case <-f.done:
-		return f.err
-	case <-ctx.Done():
-		return fmt.Errorf("clone: wait for %s: %w", target, ctx.Err())
-	}
+// Rename renames from to to, as when a branch is renamed, unless to already
+// exists or from does not. Until it is done, Ensure for to waits rather than
+// clones, and connections to from wait as for a clone.
+func (c *Cloner) Rename(ctx context.Context, from, to string) error {
+	return c.join(ctx, to, func(ctx context.Context) error { return c.rename(ctx, from, to) })
 }
 
 // Wait blocks while db is held as the source of a clone.
@@ -110,14 +116,34 @@ func (c *Cloner) Wait(ctx context.Context, db string) error {
 	}
 }
 
-// fly runs one clone under its own timeout rather than the caller's
-// cancellation, so a client giving up does not abort the clone for the others
+// join runs run as the one flight for target, or waits for the flight already
+// under way.
+func (c *Cloner) join(ctx context.Context, target string, run func(context.Context) error) error {
+	c.mu.Lock()
+	f, ok := c.flights[target]
+	if !ok {
+		f = &flight{done: make(chan struct{})}
+		c.flights[target] = f
+		go c.fly(context.WithoutCancel(ctx), f, target, run)
+	}
+	c.mu.Unlock()
+
+	select {
+	case <-f.done:
+		return f.err
+	case <-ctx.Done():
+		return fmt.Errorf("clone: wait for %s: %w", target, ctx.Err())
+	}
+}
+
+// fly runs one flight under its own timeout rather than the caller's
+// cancellation, so a client giving up does not abort it for the others
 // waiting on it.
-func (c *Cloner) fly(ctx context.Context, f *flight, target string, sources []string) {
+func (c *Cloner) fly(ctx context.Context, f *flight, target string, run func(context.Context) error) {
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	f.err = c.clone(ctx, target, sources)
+	f.err = run(ctx)
 
 	c.mu.Lock()
 	delete(c.flights, target)
@@ -141,34 +167,63 @@ func (c *Cloner) clone(ctx context.Context, target string, sources []string) err
 		return err
 	}
 
-	release := c.hold(source)
+	return c.free(ctx, source, "clone", func(ctx context.Context) error {
+		return c.admin.Copy(ctx, source, target)
+	}, "source", source, "target", target)
+}
+
+func (c *Cloner) rename(ctx context.Context, from, to string) error {
+	exists, err := c.admin.Exists(ctx, to)
+	if err != nil {
+		return fmt.Errorf("clone: check %s: %w", to, err)
+	}
+	if exists {
+		return nil
+	}
+	exists, err = c.admin.Exists(ctx, from)
+	if err != nil {
+		return fmt.Errorf("clone: check %s: %w", from, err)
+	}
+	if !exists {
+		return nil
+	}
+
+	return c.free(ctx, from, "rename", func(ctx context.Context) error {
+		return c.admin.Rename(ctx, from, to)
+	}, "from", from, "to", to)
+}
+
+// free holds db, ends its sessions and runs op, again while op reports db busy,
+// until op succeeds or ctx ends.
+func (c *Cloner) free(ctx context.Context, db, verb string, op func(context.Context) error, attrs ...any) error {
+	release := c.hold(db)
 	defer release()
 
-	logger := c.logger.With("source", source, "target", target)
+	logger := c.logger.With(attrs...)
 	start := time.Now()
 	for {
-		n, err := c.admin.Terminate(ctx, source)
+		n, err := c.admin.Terminate(ctx, db)
 		if err != nil {
-			return fmt.Errorf("clone: free %s: %w", source, err)
+			return fmt.Errorf("clone: free %s: %w", db, err)
 		}
 		if n > 0 {
-			logger.Info("interrupted sessions to clone", "sessions", n)
+			logger.Info("interrupted sessions to "+verb, "sessions", n)
 		}
 
-		err = c.admin.Copy(ctx, source, target)
+		err = op(ctx)
 		if err == nil {
-			logger.Info("cloned", "elapsed", time.Since(start).Round(time.Millisecond))
+			logger.Info(verb+"d", "elapsed", time.Since(start).Round(time.Millisecond))
 
 			return nil
 		}
 		if !errors.Is(err, ErrSourceBusy) {
-			return fmt.Errorf("clone: copy %s to %s: %w", source, target, err)
+			return fmt.Errorf("clone: %s %s: %w", verb, db, err)
 		}
 
 		select {
 		case <-time.After(c.retryInterval):
 		case <-ctx.Done():
-			return fmt.Errorf("clone: copy %s to %s: %w (%w)", source, target, err, ctx.Err())
+			return fmt.Errorf("clone: %s %s: %w (%w)", verb, db, err, ctx.Err())
 		}
 	}
 }

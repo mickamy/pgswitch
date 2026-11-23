@@ -190,3 +190,48 @@ func TestCreatedFrom(t *testing.T) {
 		})
 	}
 }
+
+func TestRenamedFrom(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t)
+	commonDir := filepath.Join(repo, ".git")
+	runGit(t, repo, "switch", "-q", "-c", "feature/old")
+	runGit(t, repo, "branch", "-m", "feature/new")
+	runGit(t, repo, "branch", "-m", "main", "trunk")
+	runGit(t, repo, "branch", "-m", "trunk", "main")
+	runGit(t, repo, "switch", "-q", "-c", "renamed-then-committed")
+	runGit(t, repo, "branch", "-m", "renamed-then-committed", "committed")
+	runGit(t, repo, "commit", "-q", "--allow-empty", "-m", "after the rename")
+	runGit(t, repo, "switch", "-q", "-c", "a")
+	runGit(t, repo, "branch", "-m", "a", "b")
+	runGit(t, repo, "branch", "-m", "b", "a2")
+	runGit(t, repo, "branch", "-m", "a2", "b")
+
+	tests := map[string]struct {
+		branch   string
+		wantFrom string
+		wantOK   bool
+	}{
+		"renamed":                  {branch: "feature/new", wantFrom: "feature/old", wantOK: true},
+		"renamed back":             {branch: "main", wantFrom: "trunk", wantOK: true},
+		"committed after a rename": {branch: "committed", wantFrom: "renamed-then-committed", wantOK: true},
+		"the latest of several":    {branch: "b", wantFrom: "a2", wantOK: true},
+		"never renamed":            {branch: "feature/new-missing", wantOK: false},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			r, ok, err := ref.RenamedFrom(commonDir, tt.branch)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.wantOK, ok)
+			assert.Equal(t, tt.wantFrom, r.From)
+			if tt.wantOK {
+				assert.WithinDuration(t, time.Now(), r.At, time.Minute)
+			}
+		})
+	}
+}
