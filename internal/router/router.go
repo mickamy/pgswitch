@@ -33,10 +33,11 @@ type Watcher interface {
 // Router routes a connection to the database of the branch checked out where
 // the connecting process runs.
 type Router struct {
-	logger  *slog.Logger
-	cloner  Cloner
-	watcher Watcher
-	lookup  lookupFunc
+	logger   *slog.Logger
+	cloner   Cloner
+	watcher  Watcher
+	lookup   lookupFunc
+	switches *switches
 }
 
 type lookupFunc func(ctx context.Context, client, server netip.AddrPort) (peer.Process, error)
@@ -44,39 +45,54 @@ type lookupFunc func(ctx context.Context, client, server netip.AddrPort) (peer.P
 var _ proxy.Router = Router{}
 
 func New(logger *slog.Logger, cloner Cloner, watcher Watcher) Router {
-	return Router{logger: logger, cloner: cloner, watcher: watcher, lookup: peer.Lookup}
+	return Router{logger: logger, cloner: cloner, watcher: watcher, lookup: peer.Lookup, switches: newSwitches()}
 }
 
-// Route clones a branch database from the default branch's on first use. It
-// fails only when that clone fails. The owner is the worktree the connection
-// came from, so the connection can be severed when that worktree switches.
+// Switched records that a worktree of the repository at commonDir went from
+// one branch to another, so a database for to can be cloned from from's.
+func (r Router) Switched(commonDir, from, to string) {
+	r.switches.record(commonDir, from, to)
+}
+
+// attribution is what resolve learned about a connection.
+type attribution struct {
+	physical string
+	owner    string
+	// sources are the databases to clone physical from, best first.
+	sources []string
+}
+
+// Route clones a branch database on first use from the database of the
+// branch it was created from, or else the default branch's. It fails only
+// when that clone fails. The owner is the worktree the connection came from,
+// so the connection can be severed when that worktree switches.
 func (r Router) Route(ctx context.Context, client, server net.Addr, database string) (proxy.Route, error) {
 	if shared[database] {
 		return proxy.Route{Database: database}, nil
 	}
 
-	physical, owner := r.resolve(ctx, client, server, database)
-	if physical != database {
-		err := r.cloner.Ensure(ctx, physical, database)
+	a := r.resolve(ctx, client, server, database)
+	if a.physical != database {
+		err := r.cloner.Ensure(ctx, a.physical, a.sources...)
 		switch {
 		case errors.Is(err, clone.ErrSourceMissing):
-			r.logger.Warn("nothing to clone from", "database", database, "physical", physical)
+			r.logger.Warn("nothing to clone from", "database", database, "physical", a.physical)
 		case err != nil:
 			return proxy.Route{}, fmt.Errorf("router: %w", err)
 		}
 	}
 
-	if err := r.cloner.Wait(ctx, physical); err != nil {
+	if err := r.cloner.Wait(ctx, a.physical); err != nil {
 		return proxy.Route{}, fmt.Errorf("router: %w", err)
 	}
 
-	return proxy.Route{Database: physical, Owner: owner}, nil
+	return proxy.Route{Database: a.physical, Owner: a.owner}, nil
 }
 
 // resolve picks the physical database and, when the connection comes from a
 // worktree, that worktree's root. A connection it cannot attribute to a
 // branch goes to the default branch, which keeps the requested name.
-func (r Router) resolve(ctx context.Context, client, server net.Addr, database string) (physical, owner string) {
+func (r Router) resolve(ctx context.Context, client, server net.Addr, database string) attribution {
 	logger := r.logger.With("client", client.String(), "database", database)
 
 	clientTCP, okClient := client.(*net.TCPAddr)
@@ -84,13 +100,13 @@ func (r Router) resolve(ctx context.Context, client, server net.Addr, database s
 	if !okClient || !okServer {
 		logger.Warn("unattributed connection", "reason", "not a TCP connection")
 
-		return database, ""
+		return attribution{physical: database}
 	}
 	proc, err := r.lookup(ctx, clientTCP.AddrPort(), serverTCP.AddrPort())
 	if err != nil {
 		logger.Warn("unattributed connection", "err", err)
 
-		return database, ""
+		return attribution{physical: database}
 	}
 	logger = logger.With("pid", proc.PID, "cwd", proc.Cwd)
 
@@ -98,12 +114,12 @@ func (r Router) resolve(ctx context.Context, client, server net.Addr, database s
 	if errors.Is(err, git.ErrNotRepository) {
 		logger.Debug("outside any repository; passing through")
 
-		return database, ""
+		return attribution{physical: database}
 	}
 	if err != nil {
 		logger.Warn("unattributed connection", "err", err)
 
-		return database, ""
+		return attribution{physical: database}
 	}
 	r.watcher.Add(wt.CommonDir)
 
@@ -111,22 +127,31 @@ func (r Router) resolve(ctx context.Context, client, server net.Addr, database s
 	if err != nil {
 		logger.Warn("unattributed connection", "worktree", wt.Root, "err", err)
 
-		return database, wt.Root
+		return attribution{physical: database, owner: wt.Root}
 	}
 	if !ok {
 		logger.Warn("unattributed connection", "worktree", wt.Root, "reason", "detached HEAD")
 
-		return database, wt.Root
+		return attribution{physical: database, owner: wt.Root}
 	}
 	defaultBranch, err := wt.DefaultBranch()
 	if err != nil {
 		logger.Warn("unattributed connection", "worktree", wt.Root, "err", err)
 
-		return database, wt.Root
+		return attribution{physical: database, owner: wt.Root}
 	}
 
-	physical = route.PhysicalName(database, branch, defaultBranch)
+	physical := route.PhysicalName(database, branch, defaultBranch)
+	var sources []string
+	if physical != database {
+		parents := r.parentBranches(wt, branch, defaultBranch)
+		for _, p := range parents {
+			sources = append(sources, route.PhysicalName(database, p, defaultBranch))
+		}
+		sources = append(sources, database)
+		logger = logger.With("parents", parents)
+	}
 	logger.Debug("attributed", "worktree", wt.Root, "branch", branch, "physical", physical)
 
-	return physical, wt.Root
+	return attribution{physical: physical, owner: wt.Root, sources: sources}
 }

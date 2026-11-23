@@ -14,9 +14,10 @@ const defaultInterval = 500 * time.Millisecond
 // Change is a worktree whose checked-out branch changed. An empty branch is a
 // detached HEAD.
 type Change struct {
-	Worktree string
-	From     string
-	To       string
+	CommonDir string
+	Worktree  string
+	From      string
+	To        string
 }
 
 // Watcher polls the HEAD of every worktree of the repositories it was given.
@@ -109,7 +110,7 @@ func (w *Watcher) scan(commonDir string) {
 
 	for root, branch := range current {
 		if from, seen := prev[root]; seen && from != branch {
-			w.onChange(Change{Worktree: root, From: from, To: branch})
+			w.onChange(Change{CommonDir: commonDir, Worktree: root, From: from, To: branch})
 		}
 	}
 }

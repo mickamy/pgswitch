@@ -327,3 +327,90 @@ func TestRouteWatchesTheRepository(t *testing.T) {
 		})
 	}
 }
+
+func TestRouteClonesFromTheParentBranch(t *testing.T) {
+	t.Parallel()
+
+	db := func(branch string) string { return route.PhysicalName(database, branch, "main") }
+
+	// Each setup starts on feature/a, one commit ahead of main, with
+	// feature/b one commit ahead of that. It returns the checkout to connect
+	// from, now on the branch under test.
+	tests := map[string]struct {
+		setup       func(t *testing.T, repo string, r router.Router) (cwd, branch string)
+		wantSources []string
+	}{
+		"the start point the reflog names": {
+			setup: func(t *testing.T, repo string, _ router.Router) (string, string) {
+				runGit(t, repo, "switch", "-q", "-c", "named", "feature/b")
+
+				return repo, "named"
+			},
+			wantSources: []string{db("feature/b"), database},
+		},
+		"the branch an observed switch came from": {
+			setup: func(t *testing.T, repo string, r router.Router) (string, string) {
+				runGit(t, repo, "switch", "-q", "-c", "observed")
+				r.Switched(filepath.Join(repo, ".git"), "feature/a", "observed")
+
+				return repo, "observed"
+			},
+			wantSources: []string{db("feature/a"), database},
+		},
+		"a branch whose tip it started at": {
+			setup: func(t *testing.T, repo string, _ router.Router) (string, string) {
+				linked := repo + "-wt"
+				runGit(t, repo, "worktree", "add", "-q", "-b", "wt", linked)
+				t.Cleanup(func() { _ = os.RemoveAll(linked) })
+
+				return linked, "wt"
+			},
+			wantSources: []string{db("feature/a"), database},
+		},
+		"the reflog before the observed switch": {
+			setup: func(t *testing.T, repo string, r router.Router) (string, string) {
+				runGit(t, repo, "switch", "-q", "-c", "explicit", "feature/b")
+				r.Switched(filepath.Join(repo, ".git"), "feature/a", "explicit")
+
+				return repo, "explicit"
+			},
+			wantSources: []string{db("feature/b"), db("feature/a"), database},
+		},
+		"the default branch is the last resort": {
+			setup: func(t *testing.T, repo string, _ router.Router) (string, string) {
+				runGit(t, repo, "switch", "-q", "-c", "from-main", "main")
+
+				return repo, "from-main"
+			},
+			wantSources: []string{database},
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			repo := newRepo(t)
+			runGit(t, repo, "switch", "-q", "-c", "feature/a")
+			runGit(t, repo, "commit", "-q", "--allow-empty", "-m", "on a")
+			runGit(t, repo, "switch", "-q", "-c", "feature/b")
+			runGit(t, repo, "commit", "-q", "--allow-empty", "-m", "on b")
+			runGit(t, repo, "switch", "-q", "feature/a")
+
+			cloner := &fakeCloner{}
+			var cwd string
+			r := router.NewWithLookup(slog.New(slog.DiscardHandler), cloner, &fakeWatcher{},
+				func(context.Context, netip.AddrPort, netip.AddrPort) (peer.Process, error) {
+					return peer.Process{PID: 42, Cwd: cwd}, nil
+				})
+			var branch string
+			cwd, branch = tt.setup(t, repo, r)
+
+			got, err := r.Route(t.Context(), client, server, database)
+			require.NoError(t, err)
+
+			assert.Equal(t, db(branch), got.Database)
+			assert.Equal(t, []string{strings.Join(tt.wantSources, ",") + "->" + db(branch)}, cloner.ensured)
+		})
+	}
+}

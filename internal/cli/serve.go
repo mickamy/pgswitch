@@ -52,14 +52,20 @@ func runServe(ctx context.Context, args []string, std IO) int {
 
 	admin := pgclone.New(pgadmin.Config{Addr: *upstream, User: *adminUser, Password: os.Getenv("PGPASSWORD")})
 
-	// The watcher severs through the proxy, which routes through the router,
-	// which feeds the watcher; p is set before the watcher runs.
-	var p proxy.Proxy
+	// The watcher reports to the router and severs through the proxy, both of
+	// which need the watcher; they are set before the watcher runs. A switch
+	// is recorded before severing, so reconnections see where it came from.
+	var (
+		r router.Router
+		p proxy.Proxy
+	)
 	w := watch.New(logger, func(c watch.Change) {
 		logger.Info("switched", "worktree", c.Worktree, "from", c.From, "to", c.To)
+		r.Switched(c.CommonDir, c.From, c.To)
 		p.Sever(c.Worktree)
 	})
-	p = proxy.New(*upstream, router.New(logger, clone.New(admin, logger), w), logger)
+	r = router.New(logger, clone.New(admin, logger), w)
+	p = proxy.New(*upstream, r, logger)
 	go w.Run(ctx)
 
 	logger.Info("serving", "listen", ln.Addr().String(), "upstream", *upstream, "admin_user", *adminUser)
