@@ -28,10 +28,10 @@ type command struct {
 
 var commands = []command{
 	{
-		name:    "hello",
-		summary: "Print a greeting",
-		run:     runHello,
-		usage:   printHelloUsage,
+		name:    "serve",
+		summary: "Run the proxy in the foreground",
+		run:     runServe,
+		usage:   printServeUsage,
 	},
 }
 
