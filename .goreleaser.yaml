@@ -1,0 +1,75 @@
+version: 2
+
+project_name: pgswitch
+
+builds:
+  - main: .
+    binary: pgswitch
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+
+archives:
+  - formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+homebrew_casks:
+  - name: pgswitch
+    homepage: https://github.com/mickamy/pgswitch
+    description: Per-branch Postgres databases behind one DATABASE_URL, following git switch and every worktree.
+    binaries:
+      - pgswitch
+    repository:
+      owner: mickamy
+      name: homebrew-tap
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    hooks:
+      post:
+        # The binaries are not signed; clear the quarantine flag so macOS runs them.
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/pgswitch"]
+          end
+
+changelog:
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Performance
+      regexp: '^.*?perf(\(.+\))??!?:.+$'
+      order: 2
+    - title: Refactor
+      regexp: '^.*?refactor(\(.+\))??!?:.+$'
+      order: 3
+    - title: Documentation
+      regexp: '^.*?docs(\(.+\))??!?:.+$'
+      order: 4
+    - title: Others
+      order: 999
+  filters:
+    exclude:
+      - "^Merge pull request"
+      - "^Merge branch"
