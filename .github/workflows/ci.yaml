@@ -35,6 +35,38 @@ jobs:
 
       - run: go test -race ./...
 
+  e2e:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [15, 16, 17, 18, 19]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7.1.0
+        with:
+          go-version-file: go.mod
+
+      - run: go test -race -tags e2e ./e2e/...
+        env:
+          PGSWITCH_E2E_ADDR: 127.0.0.1:5432
+          PGSWITCH_E2E_PASSWORD: postgres
+
   lint:
     runs-on: ubuntu-latest
     strategy:
