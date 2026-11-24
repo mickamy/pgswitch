@@ -791,7 +791,10 @@ func TestRouteSendsSharedDatabasesToTheRepositorysUpstream(t *testing.T) {
 
 	assert.Equal(t, proxy.Route{Database: "postgres", Upstream: "127.0.0.1:5433", PID: 42}, got,
 		"db:create reaches the server the repository's databases are on, and is not severed on a switch")
-	assert.Empty(t, cloners.upstreams(), "nothing is cloned")
+	on5433 := upstream.Upstream{Addr: "127.0.0.1:5433", AdminUser: router.DefaultUpstream.AdminUser}
+	assert.Equal(t, []upstream.Upstream{on5433}, cloners.upstreams(), "the upstream is known, for prune")
+	assert.Empty(t, cloners.of(on5433).ensured, "nothing is cloned")
+	assert.Empty(t, cloners.of(on5433).waited, "nothing waits on a clone")
 }
 
 func TestRouteRejectsABrokenConfiguration(t *testing.T) {

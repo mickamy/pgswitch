@@ -118,11 +118,12 @@ func (r Router) Route(ctx context.Context, client, server net.Addr, database str
 	if a.err != nil {
 		return proxy.Route{}, fmt.Errorf("router: %w", a.err)
 	}
+	// Asked for even when nothing is cloned: it is how serve learns of the
+	// upstream, which prune then looks at.
+	cloner := r.cloners(a.upstream)
 	if shared[database] {
 		return proxy.Route{Database: database, Upstream: a.route.Upstream, PID: a.route.PID, Command: a.route.Command}, nil
 	}
-
-	cloner := r.cloners(a.upstream)
 	physical := a.route.Database
 	if a.renamedFrom != "" {
 		// The same flight as the watcher's, whichever comes first.
