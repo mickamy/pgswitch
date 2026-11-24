@@ -12,10 +12,7 @@ import (
 	"time"
 )
 
-// apiVersion is the oldest the Docker API still serves, so any daemon in
-// support answers.
 const (
-	apiVersion     = "v1.40"
 	requestTimeout = 5 * time.Second
 	maxResponse    = 16 << 20
 )
@@ -101,7 +98,10 @@ func (c Client) Inspect(ctx context.Context, id string) (Container, error) {
 }
 
 func (c Client) get(ctx context.Context, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/"+apiVersion+path, nil)
+	// Unversioned, so the daemon answers in its own version: the oldest it
+	// accepts differs between releases (1.44 for Engine 29.0 to 29.2), and
+	// the fields read here have not changed.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker"+path, nil)
 	if err != nil {
 		return fmt.Errorf("docker: %w", err)
 	}

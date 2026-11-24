@@ -43,11 +43,11 @@ func routes(t *testing.T, containers ...fakeContainer) map[string]string {
 			"Config": map[string]any{"Labels": labels, "Env": c.env},
 		})
 		require.NoError(t, err)
-		out["/v1.40/containers/"+c.id+"/json"] = string(inspected)
+		out["/containers/"+c.id+"/json"] = string(inspected)
 	}
 	b, err := json.Marshal(list)
 	require.NoError(t, err)
-	out["/v1.40/containers/json"] = string(b)
+	out["/containers/json"] = string(b)
 
 	return out
 }
