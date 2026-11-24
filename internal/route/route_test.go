@@ -11,6 +11,8 @@ import (
 	"github.com/mickamy/pgswitch/internal/route"
 )
 
+const repo = "/src/shop/.git"
+
 func TestPhysicalName(t *testing.T) {
 	t.Parallel()
 
@@ -27,17 +29,17 @@ func TestPhysicalName(t *testing.T) {
 		"feature branch": {
 			db:     "shop_development",
 			branch: "feature/coupons",
-			want:   "shop_development__feature_coupons_" + ident.ShortHash("shop_development", "feature/coupons"),
+			want:   "shop_development__feature_coupons_" + ident.ShortHash(repo, "shop_development", "feature/coupons"),
 		},
 		"fits exactly in 63 bytes": {
 			db:     strings.Repeat("d", 41),
 			branch: "feature/abc",
-			want:   strings.Repeat("d", 41) + "__feature_abc_" + ident.ShortHash(strings.Repeat("d", 41), "feature/abc"),
+			want:   strings.Repeat("d", 41) + "__feature_abc_" + ident.ShortHash(repo, strings.Repeat("d", 41), "feature/abc"),
 		},
 		"branch without alphanumerics": {
 			db:     "shop_development",
 			branch: "---",
-			want:   "shop_development_" + ident.ShortHash("shop_development", "---"),
+			want:   "shop_development_" + ident.ShortHash(repo, "shop_development", "---"),
 		},
 	}
 
@@ -45,7 +47,7 @@ func TestPhysicalName(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			assert.Equal(t, tt.want, route.PhysicalName(tt.db, tt.branch, "main"))
+			assert.Equal(t, tt.want, route.PhysicalName(repo, tt.db, tt.branch, "main"))
 		})
 	}
 }
@@ -74,12 +76,12 @@ func TestPhysicalNameTruncated(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			got := route.PhysicalName(tt.db, tt.branch, "main")
+			got := route.PhysicalName(repo, tt.db, tt.branch, "main")
 
 			assert.LessOrEqual(t, len(got), 63)
 			assert.True(t, utf8.ValidString(got), "invalid UTF-8: %q", got)
 			assert.True(t, strings.HasPrefix(got, tt.wantPrefix), "%q does not start with %q", got, tt.wantPrefix)
-			assert.True(t, strings.HasSuffix(got, "_"+ident.ShortHash(tt.db, tt.branch)), "%q has no hash suffix", got)
+			assert.True(t, strings.HasSuffix(got, "_"+ident.ShortHash(repo, tt.db, tt.branch)), "%q has no hash suffix", got)
 		})
 	}
 }
@@ -101,11 +103,24 @@ func TestPhysicalNameDistinguishesBranches(t *testing.T) {
 			t.Parallel()
 
 			assert.NotEqual(t,
-				route.PhysicalName("shop_development", tt.a, "main"),
-				route.PhysicalName("shop_development", tt.b, "main"),
+				route.PhysicalName(repo, "shop_development", tt.a, "main"),
+				route.PhysicalName(repo, "shop_development", tt.b, "main"),
 			)
 		})
 	}
+}
+
+func TestPhysicalNameDistinguishesRepositories(t *testing.T) {
+	t.Parallel()
+
+	const other = "/src/shop-review/.git"
+
+	assert.NotEqual(t,
+		route.PhysicalName(repo, "shop_development", "feature/coupons", "main"),
+		route.PhysicalName(other, "shop_development", "feature/coupons", "main"),
+	)
+	assert.Equal(t, "shop_development", route.PhysicalName(other, "shop_development", "main", "main"),
+		"the default branch keeps the requested name in every repository")
 }
 
 func TestSlug(t *testing.T) {

@@ -189,14 +189,14 @@ func (r Router) resolve(ctx context.Context, client, server net.Addr, database s
 		return attribution{route: rt}
 	}
 
-	rt.Database = route.PhysicalName(database, branch, defaultBranch)
+	rt.Database = route.PhysicalName(wt.CommonDir, database, branch, defaultBranch)
 	var sources []string
 	var renamedFrom string
 	if rt.Database != database {
 		renamedFrom = r.recentlyRenamedFrom(wt.CommonDir, database, branch, defaultBranch)
 		parents := r.parentBranches(wt, branch, defaultBranch)
 		for _, p := range parents {
-			sources = append(sources, route.PhysicalName(database, p, defaultBranch))
+			sources = append(sources, route.PhysicalName(wt.CommonDir, database, p, defaultBranch))
 		}
 		if !slices.Contains(sources, database) {
 			sources = append(sources, database)
@@ -233,8 +233,8 @@ func (r Router) followRename(ctx context.Context, commonDir, from, to string) {
 	}
 
 	for _, db := range r.databases.of(commonDir) {
-		oldName := route.PhysicalName(db, from, defaultBranch)
-		newName := route.PhysicalName(db, to, defaultBranch)
+		oldName := route.PhysicalName(commonDir, db, from, defaultBranch)
+		newName := route.PhysicalName(commonDir, db, to, defaultBranch)
 		label := clone.Label{Repo: commonDir, Branch: to, Database: db}
 		if err := r.cloner.Rename(ctx, oldName, newName, label); err != nil {
 			logger.Warn("follow branch rename", "database", db, "err", err)
@@ -251,7 +251,7 @@ func (r Router) recentlyRenamedFrom(commonDir, database, branch, defaultBranch s
 		return ""
 	}
 
-	return route.PhysicalName(database, rename.From, defaultBranch)
+	return route.PhysicalName(commonDir, database, rename.From, defaultBranch)
 }
 
 // repoName names a repository by its main worktree's directory, or by its git

@@ -81,6 +81,24 @@ func TestFindLinkedWorktree(t *testing.T) {
 	assert.Equal(t, "fix-tax", branch)
 }
 
+func TestFindLinkedWorktreeThroughASymlink(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t, "main")
+	linked := filepath.Join(filepath.Dir(repo), filepath.Base(repo)+"-fix-tax")
+	runGit(t, repo, "worktree", "add", "-q", "-b", "fix-tax", linked)
+	t.Cleanup(func() { _ = os.RemoveAll(linked) })
+	alias := filepath.Join(t.TempDir(), "alias")
+	require.NoError(t, os.Symlink(repo, alias))
+	gitDir := filepath.Join(alias, ".git", "worktrees", filepath.Base(linked))
+	require.NoError(t, os.WriteFile(filepath.Join(linked, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o600))
+
+	wt, err := git.Find(linked)
+	require.NoError(t, err)
+
+	assert.Equal(t, filepath.Join(repo, ".git"), wt.CommonDir)
+}
+
 func TestFindOutsideRepository(t *testing.T) {
 	t.Parallel()
 

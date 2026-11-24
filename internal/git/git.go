@@ -79,6 +79,10 @@ func open(root string) (Worktree, error) {
 	if err != nil {
 		return Worktree{}, err
 	}
+	// It names branch databases, so every worktree must spell it alike.
+	if commonDir, err = filepath.EvalSymlinks(commonDir); err != nil {
+		return Worktree{}, fmt.Errorf("git: %w", err)
+	}
 
 	return Worktree{Root: root, GitDir: gitDir, CommonDir: commonDir}, nil
 }
