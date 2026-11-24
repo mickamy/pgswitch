@@ -117,7 +117,7 @@ func startServe(t *testing.T, flags ...string) (addr string, stderr *lockedBuffe
 	done := make(chan int, 1)
 	go func() {
 		std := cli.IO{In: strings.NewReader(""), Out: io.Discard, Err: stderr}
-		args := append([]string{"serve", "-listen", addr, "-control", ""}, flags...)
+		args := append([]string{"serve", "-listen", addr, "-control", "", "-password-file", ""}, flags...)
 		done <- cli.Run(ctx, args, std)
 	}()
 

@@ -34,6 +34,7 @@ func runServe(ctx context.Context, args []string, std IO) int {
 	listen := fs.String("listen", defaultListen, "address to accept clients on")
 	upstreamAddr := fs.String("upstream", defaultUpstream, "address of the Postgres server")
 	adminUser := fs.String("admin-user", currentUser(), "role that creates branch databases; password from PGPASSWORD")
+	passwordFile := fs.String("password-file", defaultPasswordFile(), "admin password when PGPASSWORD is unset")
 	debug := fs.Bool("debug", false, "log how each connection is attributed")
 	controlPath := fs.String("control", defaultControl(), "control socket for status, log and prune; empty to disable")
 	if err := fs.Parse(args); err != nil {
@@ -62,7 +63,13 @@ func runServe(ctx context.Context, args []string, std IO) int {
 		return fail(std, err)
 	}
 
-	byDefault := upstream.Upstream{Addr: *upstreamAddr, AdminUser: *adminUser, AdminPassword: os.Getenv("PGPASSWORD")}
+	password := os.Getenv("PGPASSWORD")
+	if password == "" {
+		if password, err = readPassword(*passwordFile); err != nil {
+			return fail(std, err)
+		}
+	}
+	byDefault := upstream.Upstream{Addr: *upstreamAddr, AdminUser: *adminUser, AdminPassword: password}
 	servers := upstream.NewPool(func(u upstream.Upstream) server {
 		admin := pgclone.New(pgadmin.Config{Addr: u.Addr, User: u.AdminUser, Password: u.AdminPassword})
 
@@ -120,13 +127,24 @@ func printServeUsage(w io.Writer) {
 	fmt.Fprintf(w, "Usage: %s serve [flags]\n\n", Name)
 	fmt.Fprint(w, "Run the proxy in the foreground until interrupted.\n\n")
 	fmt.Fprint(w, "Flags:\n")
-	fmt.Fprintf(w, "  -listen ADDR      address to accept clients on (default %q)\n", defaultListen)
-	fmt.Fprintf(w, "  -upstream ADDR    address of the Postgres server (default %q)\n", defaultUpstream)
-	fmt.Fprint(w, "  -admin-user NAME  role that creates branch databases (default: the OS user)\n")
-	fmt.Fprint(w, "                    its password is read from PGPASSWORD\n")
-	fmt.Fprint(w, "  -debug            log how each connection is attributed\n")
-	fmt.Fprint(w, "  -control PATH     control socket for status, log and prune; empty to disable\n")
-	fmt.Fprint(w, "                    (default: in the state directory)\n")
+	fmt.Fprintf(w, "  -listen ADDR         address to accept clients on (default %q)\n", defaultListen)
+	fmt.Fprintf(w, "  -upstream ADDR       address of the Postgres server (default %q)\n", defaultUpstream)
+	fmt.Fprint(w, "  -admin-user NAME     role that creates branch databases (default: the OS user)\n")
+	fmt.Fprint(w, "                       its password is read from PGPASSWORD, else from -password-file\n")
+	fmt.Fprint(w, "  -password-file PATH  the admin password, as service install keeps it; empty to disable\n")
+	fmt.Fprint(w, "                       (default: in the state directory)\n")
+	fmt.Fprint(w, "  -debug               log how each connection is attributed\n")
+	fmt.Fprint(w, "  -control PATH        control socket for status, log and prune; empty to disable\n")
+	fmt.Fprint(w, "                       (default: in the state directory)\n")
+}
+
+func defaultPasswordFile() string {
+	path, err := statedir.PasswordFile()
+	if err != nil {
+		return ""
+	}
+
+	return path
 }
 
 func defaultControl() string {

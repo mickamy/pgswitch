@@ -70,13 +70,19 @@ func TestDirWithoutHome(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestSocket(t *testing.T) {
+func TestFiles(t *testing.T) {
 	t.Parallel()
 
 	dir, err := statedir.Dir()
 	require.NoError(t, err)
 	socket, err := statedir.Socket()
 	require.NoError(t, err)
+	password, err := statedir.PasswordFile()
+	require.NoError(t, err)
+	log, err := statedir.LogFile()
+	require.NoError(t, err)
 
 	assert.Equal(t, filepath.Join(dir, "pgswitch.sock"), socket)
+	assert.Equal(t, filepath.Join(dir, "admin-password"), password)
+	assert.Equal(t, filepath.Join(dir, "pgswitch.log"), log)
 }

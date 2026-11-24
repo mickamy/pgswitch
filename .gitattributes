@@ -1,0 +1,2 @@
+# Golden files are compared byte for byte with what the code writes.
+internal/service/testdata/* text eol=lf

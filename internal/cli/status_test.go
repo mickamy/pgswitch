@@ -118,7 +118,7 @@ func TestServeAnswersStatus(t *testing.T) { //nolint:paralleltest // t.Chdir cha
 	go func() {
 		var out, errOut bytes.Buffer
 		std := cli.IO{In: strings.NewReader(""), Out: &out, Err: &errOut}
-		done <- cli.Run(ctx, []string{"serve", "-listen", addr, "-control", socket}, std)
+		done <- cli.Run(ctx, []string{"serve", "-listen", addr, "-control", socket, "-password-file", ""}, std)
 	}()
 
 	require.Eventually(t, func() bool {
@@ -129,7 +129,7 @@ func TestServeAnswersStatus(t *testing.T) { //nolint:paralleltest // t.Chdir cha
 	_, out, _ := runCLI(t, "status", "-control", socket)
 	assert.Equal(t, "no connections\n", out)
 
-	code, _, stderr := runCLI(t, "serve", "-listen", freeAddr(t), "-control", socket)
+	code, _, stderr := runCLI(t, "serve", "-listen", freeAddr(t), "-control", socket, "-password-file", "")
 	assert.Equal(t, exit.Error, code)
 	assert.Contains(t, stderr, "already running")
 	code, _, _ = runCLI(t, "status", "-control", socket)

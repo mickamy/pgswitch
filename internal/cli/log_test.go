@@ -105,7 +105,7 @@ func TestServeKeepsItsLogForLog(t *testing.T) { //nolint:paralleltest // t.Chdir
 	done := make(chan int, 1)
 	go func() {
 		std := cli.IO{In: strings.NewReader(""), Out: &bytes.Buffer{}, Err: &lockedBuffer{}}
-		done <- cli.Run(ctx, []string{"serve", "-listen", addr, "-control", socket}, std)
+		done <- cli.Run(ctx, []string{"serve", "-listen", addr, "-control", socket, "-password-file", ""}, std)
 	}()
 
 	require.Eventually(t, func() bool {
