@@ -179,18 +179,20 @@ func TestSystemd(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]struct {
-		vars    map[string]string
+		// xdg is XDG_CONFIG_HOME for a home directory, "" for none.
+		xdg     func(home string) string
 		wantDir func(home string) string
 	}{
 		"in ~/.config": {
+			xdg:     func(string) string { return "" },
 			wantDir: func(home string) string { return filepath.Join(home, ".config", "systemd", "user") },
 		},
 		"in XDG_CONFIG_HOME": {
-			vars:    map[string]string{"XDG_CONFIG_HOME": filepath.FromSlash("/xdg")},
-			wantDir: func(string) string { return filepath.Join(filepath.FromSlash("/xdg"), "systemd", "user") },
+			xdg:     func(home string) string { return filepath.Join(home, "xdg") },
+			wantDir: func(home string) string { return filepath.Join(home, "xdg", "systemd", "user") },
 		},
 		"a relative XDG_CONFIG_HOME is ignored": {
-			vars:    map[string]string{"XDG_CONFIG_HOME": "xdg"},
+			xdg:     func(string) string { return "xdg" },
 			wantDir: func(home string) string { return filepath.Join(home, ".config", "systemd", "user") },
 		},
 	}
@@ -199,11 +201,18 @@ func TestSystemd(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			e := env(t, "linux", tt.vars)
+			home := t.TempDir()
+			e := service.Env{GOOS: "linux", Home: home, Getenv: func(k string) string {
+				if k == "XDG_CONFIG_HOME" {
+					return tt.xdg(home)
+				}
+
+				return ""
+			}}
 			m, err := service.New(e, (&fakeRunner{}).run)
 			require.NoError(t, err)
 
-			assert.Equal(t, filepath.Join(tt.wantDir(e.Home), "pgswitch.service"), m.UnitPath())
+			assert.Equal(t, filepath.Join(tt.wantDir(home), "pgswitch.service"), m.UnitPath())
 		})
 	}
 }
