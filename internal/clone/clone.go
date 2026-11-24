@@ -44,6 +44,8 @@ type Admin interface {
 	// Rename gives from the name to and relabels it. It returns ErrSourceBusy
 	// while from has sessions.
 	Rename(ctx context.Context, from, to string, label Label) error
+	// Drop drops db. It returns ErrInUse while db has sessions.
+	Drop(ctx context.Context, db string) error
 }
 
 // Cloner creates branch databases on demand. While it copies a source, new
@@ -94,7 +96,7 @@ func (c *Cloner) Ensure(ctx context.Context, target string, label Label, sources
 			return nil
 		}
 
-		err = c.join(ctx, target, func(ctx context.Context) error { return c.clone(ctx, target, label, sources) })
+		_, err = c.join(ctx, target, func(ctx context.Context) error { return c.clone(ctx, target, label, sources) })
 		if err != nil {
 			return err
 		}
@@ -105,12 +107,72 @@ func (c *Cloner) Ensure(ctx context.Context, target string, label Label, sources
 
 // Rename renames from to to, as when a branch is renamed, unless to already
 // exists or from does not. Until it is done, Ensure for to waits rather than
-// clones, and connections to from wait as for a clone.
+// clones, and connections to from wait as for a clone. Joining another flight
+// for to, such as a drop, does not count: it tries again once that is done.
 func (c *Cloner) Rename(ctx context.Context, from, to string, label Label) error {
-	return c.join(ctx, to, func(ctx context.Context) error { return c.rename(ctx, from, to, label) })
+	for range ensureAttempts {
+		own, err := c.join(ctx, to, func(ctx context.Context) error { return c.rename(ctx, from, to, label) })
+		if own || err != nil {
+			return err
+		}
+	}
+
+	return fmt.Errorf("clone: rename to %s did not run in %d attempts", to, ensureAttempts)
 }
 
-// Wait blocks while db is held as the source of a clone.
+// Drop drops db if check, asked once db is held, still says it may go. It
+// runs as the flight for db: Ensure and Rename for db wait for it, and so do
+// connections to db in Wait. When a clone or rename to db is already under
+// way, it drops nothing. It reports whether db was dropped.
+func (c *Cloner) Drop(ctx context.Context, db string, check func(context.Context) (bool, error)) (bool, error) {
+	c.mu.Lock()
+	if _, busy := c.flights[db]; busy {
+		c.mu.Unlock()
+
+		return false, nil
+	}
+	f := &flight{done: make(chan struct{})}
+	c.flights[db] = f
+	c.mu.Unlock()
+
+	var dropped bool
+	go c.fly(context.WithoutCancel(ctx), f, db, func(ctx context.Context) error {
+		release := c.hold(db)
+		defer release()
+
+		ok, err := check(ctx)
+		if err != nil {
+			return fmt.Errorf("clone: check %s: %w", db, err)
+		}
+		if !ok {
+			return nil
+		}
+		if err := c.admin.Drop(ctx, db); err != nil {
+			return fmt.Errorf("clone: drop %s: %w", db, err)
+		}
+		dropped = true
+
+		return nil
+	})
+
+	select {
+	case <-f.done:
+		return dropped, f.err
+	case <-ctx.Done():
+		return false, fmt.Errorf("clone: drop %s: %w", db, ctx.Err())
+	}
+}
+
+// Idle reports whether no clone, rename or drop is under way.
+func (c *Cloner) Idle() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return len(c.flights) == 0
+}
+
+// Wait blocks while db is held as the source of a clone, or while it is being
+// dropped.
 func (c *Cloner) Wait(ctx context.Context, db string) error {
 	c.mu.Lock()
 	h, ok := c.holds[db]
@@ -128,8 +190,8 @@ func (c *Cloner) Wait(ctx context.Context, db string) error {
 }
 
 // join runs run as the one flight for target, or waits for the flight already
-// under way.
-func (c *Cloner) join(ctx context.Context, target string, run func(context.Context) error) error {
+// under way. own reports which.
+func (c *Cloner) join(ctx context.Context, target string, run func(context.Context) error) (own bool, err error) {
 	c.mu.Lock()
 	f, ok := c.flights[target]
 	if !ok {
@@ -141,9 +203,9 @@ func (c *Cloner) join(ctx context.Context, target string, run func(context.Conte
 
 	select {
 	case <-f.done:
-		return f.err
+		return !ok, f.err
 	case <-ctx.Done():
-		return fmt.Errorf("clone: wait for %s: %w", target, ctx.Err())
+		return !ok, fmt.Errorf("clone: wait for %s: %w", target, ctx.Err())
 	}
 }
 

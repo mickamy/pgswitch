@@ -2,6 +2,7 @@ package clone_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -28,6 +29,8 @@ type fakeAdmin struct {
 	copies     []string
 	renames    []string
 	labels     map[string]clone.Label
+	drops      []string
+	dropErr    error
 	terminated int
 
 	// When gate is set, Copy signals started and blocks until gate closes.
@@ -122,6 +125,26 @@ func (a *fakeAdmin) Rename(ctx context.Context, from, to string, l clone.Label) 
 	a.labels[to] = l
 
 	return nil
+}
+
+func (a *fakeAdmin) Drop(_ context.Context, db string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.dropErr != nil {
+		return a.dropErr
+	}
+	a.drops = append(a.drops, db)
+	delete(a.dbs, db)
+
+	return nil
+}
+
+func (a *fakeAdmin) dropped() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return append([]string(nil), a.drops...)
 }
 
 func (a *fakeAdmin) renamed() []string {
@@ -450,4 +473,132 @@ func TestEnsureClonesAfterARenameWithNothingToMove(t *testing.T) {
 	require.NoError(t, <-ensured)
 	copies, _ := admin.snapshot()
 	assert.Equal(t, []string{source + "->" + target}, copies, "Ensure cloned once the rename moved nothing")
+}
+
+func TestDrop(t *testing.T) {
+	t.Parallel()
+
+	checkErr := errors.New("branch lookup failed")
+	tests := map[string]struct {
+		admin       *fakeAdmin
+		check       func(context.Context) (bool, error)
+		wantDropped bool
+		wantErr     error
+		wantDBs     map[string]bool
+	}{
+		"drops": {
+			admin:       newFakeAdmin(target),
+			check:       func(context.Context) (bool, error) { return true, nil },
+			wantDropped: true,
+			wantDBs:     map[string]bool{},
+		},
+		"the check says to keep it": {
+			admin:   newFakeAdmin(target),
+			check:   func(context.Context) (bool, error) { return false, nil },
+			wantDBs: map[string]bool{target: true},
+		},
+		"the check fails": {
+			admin:   newFakeAdmin(target),
+			check:   func(context.Context) (bool, error) { return false, checkErr },
+			wantErr: checkErr,
+			wantDBs: map[string]bool{target: true},
+		},
+		"in use": {
+			admin: func() *fakeAdmin {
+				a := newFakeAdmin(target)
+				a.dropErr = clone.ErrInUse
+
+				return a
+			}(),
+			check:   func(context.Context) (bool, error) { return true, nil },
+			wantErr: clone.ErrInUse,
+			wantDBs: map[string]bool{target: true},
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			dropped, err := newCloner(tt.admin).Drop(t.Context(), target, tt.check)
+
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tt.wantDropped, dropped)
+			assert.Equal(t, tt.wantDBs, tt.admin.dbs)
+		})
+	}
+}
+
+func TestDropLeavesADatabaseBeingCloned(t *testing.T) {
+	t.Parallel()
+
+	admin := newFakeAdmin(source)
+	admin.gate = make(chan struct{})
+	admin.started = make(chan struct{}, 1)
+	c := newCloner(admin)
+
+	ensured := make(chan error, 1)
+	go func() { ensured <- c.Ensure(t.Context(), target, label, source) }()
+	<-admin.started
+
+	checked := false
+	dropped, err := c.Drop(t.Context(), target, func(context.Context) (bool, error) {
+		checked = true
+
+		return true, nil
+	})
+	require.NoError(t, err)
+	assert.False(t, dropped)
+	assert.False(t, checked, "nothing is asked while the clone is under way")
+
+	close(admin.gate)
+	require.NoError(t, <-ensured)
+	assert.Empty(t, admin.dropped())
+}
+
+func TestDropHoldsTheDatabase(t *testing.T) {
+	t.Parallel()
+
+	const renamed = "shop_development__fix_vat_8c1f02aa"
+
+	admin := newFakeAdmin(target)
+	c := newCloner(admin)
+	inCheck := make(chan struct{})
+	release := make(chan struct{})
+
+	dropping := make(chan error, 1)
+	go func() {
+		_, err := c.Drop(t.Context(), renamed, func(context.Context) (bool, error) {
+			close(inCheck)
+			<-release
+
+			return true, nil
+		})
+		dropping <- err
+	}()
+	<-inCheck
+	assert.False(t, c.Idle())
+
+	waited := make(chan error, 1)
+	go func() { waited <- c.Wait(t.Context(), renamed) }()
+	renaming := make(chan error, 1)
+	go func() { renaming <- c.Rename(t.Context(), target, renamed, label) }()
+	select {
+	case <-waited:
+		require.FailNow(t, "Wait returned while the database was being dropped")
+	case <-renaming:
+		require.FailNow(t, "Rename ran while the database was being dropped")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	require.NoError(t, <-dropping)
+	require.NoError(t, <-waited)
+	require.NoError(t, <-renaming)
+	assert.Equal(t, []string{target + "->" + renamed}, admin.renamed(), "the rename ran after the drop")
+	assert.True(t, c.Idle())
 }
