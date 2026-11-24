@@ -45,6 +45,7 @@ type Router struct {
 	// byDefault is the upstream of connections whose repository names none.
 	byDefault upstream.Upstream
 	cloners   func(upstream.Upstream) Cloner
+	postgres  *postgresCache
 	watcher   Watcher
 	lookup    lookupFunc
 	switches  *switches
@@ -55,14 +56,17 @@ type lookupFunc func(ctx context.Context, client, server netip.AddrPort) (peer.P
 
 var _ proxy.Router = Router{}
 
-// New returns a router that clones through cloners(u), one per upstream u.
+// New returns a router that clones through cloners(u), one per upstream u,
+// and finds the upstream of a repository whose configuration names none
+// through postgres, when it is not nil.
 func New(logger *slog.Logger, byDefault upstream.Upstream, cloners func(upstream.Upstream) Cloner,
-	watcher Watcher,
+	postgres PostgresFinder, watcher Watcher,
 ) Router {
 	return Router{
 		logger:    logger,
 		byDefault: byDefault,
 		cloners:   cloners,
+		postgres:  newPostgresCache(logger, postgres),
 		watcher:   watcher,
 		lookup:    peer.Lookup,
 		switches:  newSwitches(),
@@ -186,7 +190,7 @@ func (r Router) resolve(ctx context.Context, client, server net.Addr, database s
 		return byDefault
 	}
 
-	up, err := r.upstreamOf(wt.Root)
+	up, err := r.upstreamOf(ctx, wt)
 	if err != nil {
 		return attribution{err: err}
 	}
@@ -252,18 +256,21 @@ func (r Router) resolve(ctx context.Context, client, server net.Addr, database s
 	}
 }
 
-// upstreamOf returns the upstream the worktree at root names in its
-// configuration, with the defaults filling in what it leaves out.
-func (r Router) upstreamOf(root string) (upstream.Upstream, error) {
-	cfg, ok, err := repoconf.Load(root)
-	if err != nil || !ok {
-		return r.byDefault, err //nolint:wrapcheck // repoconf's errors name the file
+// upstreamOf returns the upstream of wt: the one its configuration names,
+// else the Postgres its repository runs in Docker, else the default. The
+// configuration's credentials win over the others.
+func (r Router) upstreamOf(ctx context.Context, wt git.Worktree) (upstream.Upstream, error) {
+	cfg, _, err := repoconf.Load(wt.Root)
+	if err != nil {
+		return upstream.Upstream{}, err //nolint:wrapcheck // repoconf's errors name the file
 	}
 
 	up := r.byDefault
 	if cfg.Upstream != "" {
 		// Another server: the default credentials are not for it.
 		up = upstream.Upstream{Addr: cfg.Upstream, AdminUser: r.byDefault.AdminUser}
+	} else if pg, ok := r.postgres.find(ctx, wt.CommonDir); ok {
+		up = upstream.Upstream{Addr: pg.Addr, AdminUser: pg.User, AdminPassword: pg.Password}
 	}
 	if cfg.AdminUser != "" {
 		up.AdminUser = cfg.AdminUser

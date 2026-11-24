@@ -155,7 +155,7 @@ func startProxy(t *testing.T, admin pgadmin.Config) string {
 	})
 	cloner := clone.New(pgclone.New(admin), logger)
 	byDefault := upstream.Upstream{Addr: admin.Addr, AdminUser: admin.User, AdminPassword: admin.Password}
-	r = router.New(logger, byDefault, func(upstream.Upstream) router.Cloner { return cloner }, w)
+	r = router.New(logger, byDefault, func(upstream.Upstream) router.Cloner { return cloner }, nil, w)
 	p = proxy.New(admin.Addr, r, logger)
 	go w.Run(t.Context())
 	done := make(chan error, 1)

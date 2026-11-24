@@ -73,7 +73,7 @@ func TestProxyRoutesToTheRepositorysUpstream(t *testing.T) { //nolint:parallelte
 	})
 	byDefault := upstream.Upstream{Addr: cfg.Addr, AdminUser: "pgswitch_e2e_nobody", AdminPassword: "wrong"}
 	w := watch.New(logger, func(watch.Change) {})
-	r := router.New(logger, byDefault, func(u upstream.Upstream) router.Cloner { return servers.Get(u).cloner }, w)
+	r := router.New(logger, byDefault, func(u upstream.Upstream) router.Cloner { return servers.Get(u).cloner }, nil, w)
 	p := proxy.New(cfg.Addr, r, logger)
 
 	var lc net.ListenConfig

@@ -2,6 +2,8 @@ package router_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"net"
@@ -13,11 +15,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/mickamy/pgswitch/internal/clone"
+	"github.com/mickamy/pgswitch/internal/docker"
 	"github.com/mickamy/pgswitch/internal/peer"
 	"github.com/mickamy/pgswitch/internal/proxy"
 	"github.com/mickamy/pgswitch/internal/repoconf"
@@ -827,4 +831,130 @@ func TestSwitchedRenamesOnTheDatabasesUpstream(t *testing.T) {
 	assert.Equal(t, []string{
 		physical(repo, database, "feature/old") + "->" + physical(repo, database, "feature/new"),
 	}, on5433.renamed)
+}
+
+// fakeFinder answers for Docker, recording the roots it is asked about.
+type fakeFinder struct {
+	mu       sync.Mutex
+	postgres docker.Postgres
+	ok       bool
+	err      error
+	asked    [][]string
+}
+
+var _ router.PostgresFinder = (*fakeFinder)(nil)
+
+func (f *fakeFinder) FindPostgres(_ context.Context, roots []string) (docker.Postgres, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.asked = append(f.asked, roots)
+
+	return f.postgres, f.ok, f.err
+}
+
+func (f *fakeFinder) times() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return len(f.asked)
+}
+
+var inDocker = docker.Postgres{ContainerID: "4d51f0679caa", Addr: "127.0.0.1:5433", User: "shop", Password: "secret"}
+
+func TestRouteFindsTheRepositorysPostgresInDocker(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		config    string
+		finder    *fakeFinder
+		want      upstream.Upstream
+		wantAsked bool
+	}{
+		"found": {
+			finder:    &fakeFinder{postgres: inDocker, ok: true},
+			want:      upstream.Upstream{Addr: "127.0.0.1:5433", AdminUser: "shop", AdminPassword: "secret"},
+			wantAsked: true,
+		},
+		"the configuration's credentials win": {
+			config:    "admin_user = \"owner\"\nadmin_password = \"owner-pw\"",
+			finder:    &fakeFinder{postgres: inDocker, ok: true},
+			want:      upstream.Upstream{Addr: "127.0.0.1:5433", AdminUser: "owner", AdminPassword: "owner-pw"},
+			wantAsked: true,
+		},
+		"the configuration's upstream wins": {
+			config: `upstream = "127.0.0.1:5434"`,
+			finder: &fakeFinder{postgres: inDocker, ok: true},
+			want:   upstream.Upstream{Addr: "127.0.0.1:5434", AdminUser: router.DefaultUpstream.AdminUser},
+		},
+		"none": {
+			finder:    &fakeFinder{},
+			want:      router.DefaultUpstream,
+			wantAsked: true,
+		},
+		"several": {
+			finder:    &fakeFinder{err: fmt.Errorf("%w: a, b", docker.ErrAmbiguous)},
+			want:      router.DefaultUpstream,
+			wantAsked: true,
+		},
+		"no Docker": {
+			finder:    &fakeFinder{err: errors.New("dial unix /var/run/docker.sock: connect: no such file or directory")},
+			want:      router.DefaultUpstream,
+			wantAsked: true,
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			repo := newRepo(t)
+			linked := repo + "-fix-tax"
+			runGit(t, repo, "worktree", "add", "-q", "-b", "fix-tax", linked)
+			t.Cleanup(func() { _ = os.RemoveAll(linked) })
+			if tt.config != "" {
+				writeConfig(t, linked, tt.config)
+			}
+			cloners := &clonersByUpstream{}
+			r := router.NewWithPostgres(slog.New(slog.DiscardHandler), cloners.get, tt.finder, &fakeWatcher{},
+				lookupAt(linked))
+
+			got, err := r.Route(t.Context(), client, server, database)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.want.Addr, got.Upstream)
+			assert.Equal(t, []upstream.Upstream{tt.want}, cloners.upstreams())
+			if tt.wantAsked {
+				assert.Equal(t, [][]string{{repo, linked}}, tt.finder.asked, "about every worktree of the repository")
+			} else {
+				assert.Empty(t, tt.finder.asked)
+			}
+		})
+	}
+}
+
+func TestRouteReusesWhatDockerSaidForAWhile(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t)
+	finder := &fakeFinder{postgres: inDocker, ok: true}
+	r := router.NewWithPostgres(slog.New(slog.DiscardHandler), (&clonersByUpstream{}).get, finder, &fakeWatcher{},
+		lookupAt(repo))
+	now := time.Date(2026, 11, 25, 9, 0, 0, 0, time.UTC)
+	router.SetClock(r, func() time.Time { return now })
+
+	route := func() {
+		t.Helper()
+
+		_, err := r.Route(t.Context(), client, server, database)
+		require.NoError(t, err)
+	}
+	route()
+	now = now.Add(4 * time.Second)
+	route()
+	assert.Equal(t, 1, finder.times(), "asked once for connections close together")
+
+	now = now.Add(2 * time.Second)
+	route()
+	assert.Equal(t, 2, finder.times(), "asked again once that is old")
 }
