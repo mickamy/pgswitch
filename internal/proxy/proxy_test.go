@@ -370,9 +370,15 @@ func TestSeverClosesTheOwnersConnections(t *testing.T) {
 
 	upstream, received := startUpstream(t)
 	byDatabase := proxy.RouterFunc(func(_ context.Context, _, _ net.Addr, database string) (proxy.Route, error) {
-		owners := map[string]string{"on_fix_tax": "/src/shop-fix-tax", "on_main": "/src/shop"}
+		routes := map[string]proxy.Route{
+			"on_fix_tax": {Owner: "/src/shop-fix-tax", Branch: "fix-tax"},
+			"on_fix_vat": {Owner: "/src/shop-fix-tax", Branch: "fix-vat"},
+			"on_main":    {Owner: "/src/shop", Branch: "main"},
+		}
+		rt := routes[database]
+		rt.Database = database
 
-		return proxy.Route{Database: database, Owner: owners[database]}, nil
+		return rt, nil
 	})
 	p := proxy.New(upstream, byDatabase, slog.New(slog.DiscardHandler))
 	addr, _ := serveProxy(t, p)
@@ -388,18 +394,20 @@ func TestSeverClosesTheOwnersConnections(t *testing.T) {
 
 		return conn
 	}
+	// The worktree switched from fix-tax to fix-vat; one connection came after.
 	severed1, severed2 := open("on_fix_tax"), open("on_fix_tax")
+	afterSwitch := open("on_fix_vat")
 	kept, unowned := open("on_main"), open("unowned")
 
-	assert.Equal(t, 0, p.Sever("/src/elsewhere"))
-	assert.Equal(t, 2, p.Sever("/src/shop-fix-tax"))
-	assert.Equal(t, 0, p.Sever("/src/shop-fix-tax"), "already severed")
+	assert.Equal(t, 0, p.Sever("/src/elsewhere", "fix-vat"))
+	assert.Equal(t, 2, p.Sever("/src/shop-fix-tax", "fix-vat"))
+	assert.Equal(t, 0, p.Sever("/src/shop-fix-tax", "fix-vat"), "already severed")
 
 	for _, conn := range []net.Conn{severed1, severed2} {
 		_, err := conn.Read(make([]byte, 1))
 		require.ErrorIs(t, err, io.EOF)
 	}
-	for _, conn := range []net.Conn{kept, unowned} {
+	for _, conn := range []net.Conn{afterSwitch, kept, unowned} {
 		_, err := conn.Write([]byte("ping"))
 		require.NoError(t, err)
 		echo := make([]byte, 4)
