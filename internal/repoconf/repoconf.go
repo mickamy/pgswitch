@@ -78,16 +78,15 @@ func Parse(b []byte) (Config, error) {
 			return Config{}, fmt.Errorf("%d: %s is set twice", n, key)
 		}
 		seen[key] = true
+		if key == "upstream" {
+			if err := checkUpstream(value); err != nil {
+				return Config{}, fmt.Errorf("%d: %w", n, err)
+			}
+		}
 		*field = value
 	}
 	if err := sc.Err(); err != nil {
 		return Config{}, fmt.Errorf("%w", err)
-	}
-
-	if cfg.Upstream != "" {
-		if err := checkUpstream(cfg.Upstream); err != nil {
-			return Config{}, err
-		}
 	}
 
 	return cfg, nil

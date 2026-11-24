@@ -46,19 +46,19 @@ admin_password = 'pa"ss#word'
 		},
 		"another host": {
 			in:      `upstream = "db.example.com:5432"`,
-			wantErr: `upstream: "db.example.com" is not a loopback address`,
+			wantErr: `1: upstream: "db.example.com" is not a loopback address`,
 		},
 		"a private address": {
 			in:      `upstream = "192.168.1.10:5432"`,
-			wantErr: `upstream: "192.168.1.10" is not a loopback address`,
+			wantErr: `1: upstream: "192.168.1.10" is not a loopback address`,
 		},
 		"no port": {
 			in:      `upstream = "127.0.0.1"`,
-			wantErr: "upstream: address 127.0.0.1: missing port in address",
+			wantErr: "1: upstream: address 127.0.0.1: missing port in address",
 		},
 		"bad port": {
 			in:      `upstream = "127.0.0.1:postgres"`,
-			wantErr: `upstream: invalid port "postgres"`,
+			wantErr: `1: upstream: invalid port "postgres"`,
 		},
 		"unknown key": {
 			in:      "upstream = \"127.0.0.1:5433\"\nshared = \"postgres\"",
