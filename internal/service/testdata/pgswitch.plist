@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.github.mickamy.pgswitch</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/homebrew/bin/pgswitch</string>
+		<string>serve</string>
+		<string>-listen</string>
+		<string>127.0.0.1:6432</string>
+		<string>-upstream</string>
+		<string>127.0.0.1:5432</string>
+		<string>-admin-user</string>
+		<string>me &amp; you</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>/Users/me/Library/Application Support/pgswitch/pgswitch.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/me/Library/Application Support/pgswitch/pgswitch.log</string>
+</dict>
+</plist>

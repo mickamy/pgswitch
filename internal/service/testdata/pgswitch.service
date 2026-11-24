@@ -1,0 +1,9 @@
+[Unit]
+Description=pgswitch: per-branch Postgres databases
+
+[Service]
+ExecStart=/opt/homebrew/bin/pgswitch serve -listen 127.0.0.1:6432 -upstream 127.0.0.1:5432 -admin-user "me & you"
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
