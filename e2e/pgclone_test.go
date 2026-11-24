@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -243,4 +244,62 @@ func TestPGCloneRenames(t *testing.T) {
 	exists, err := a.Exists(t.Context(), from)
 	require.NoError(t, err)
 	assert.False(t, exists)
+}
+
+func TestPGCloneListsLabeledAndStagingDatabases(t *testing.T) {
+	t.Parallel()
+
+	cfg := adminConfig(t)
+	admin := connect(t, cfg)
+	source := uniqueName("pgswitch_e2e")
+	target := source + "__fix_tax"
+	staging := uniqueName("pgswitch_staging_e2e")
+	commented := uniqueName("pgswitch_e2e_commented")
+	createDatabase(t, admin, source)
+	createDatabase(t, admin, staging)
+	createDatabase(t, admin, commented)
+	require.NoError(t, admin.Exec(t.Context(), `comment on database "`+commented+`" is 'not ours'`))
+	dropOnCleanup(t, admin, target)
+
+	a := pgclone.New(cfg)
+	label := clone.Label{Repo: "/src/shop/.git", Branch: "fix-tax", Database: source}
+	require.NoError(t, a.Copy(t.Context(), source, target, label))
+
+	labels, err := a.Labels(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, label, labels[target])
+	assert.NotContains(t, labels, source, "the source is not a branch database")
+	assert.NotContains(t, labels, commented, "a comment pgswitch did not write is no label")
+
+	names, err := a.Staging(t.Context())
+	require.NoError(t, err)
+	assert.Contains(t, names, staging)
+	assert.NotContains(t, names, target)
+}
+
+func TestPGCloneDrops(t *testing.T) {
+	t.Parallel()
+
+	cfg := adminConfig(t)
+	admin := connect(t, cfg)
+	db := uniqueName("pgswitch_e2e")
+	createDatabase(t, admin, db)
+
+	onDB := cfg
+	onDB.Database = db
+	session := connect(t, onDB)
+
+	a := pgclone.New(cfg)
+	require.ErrorIs(t, a.Drop(t.Context(), db), clone.ErrInUse, "a session is still on it")
+	exists, err := a.Exists(t.Context(), db)
+	require.NoError(t, err)
+	assert.True(t, exists)
+	require.NoError(t, session.Exec(t.Context(), "select 1"), "the session is left alone")
+
+	require.NoError(t, session.Close())
+	require.Eventually(t, func() bool { return a.Drop(t.Context(), db) == nil }, 5*time.Second, 50*time.Millisecond)
+	exists, err = a.Exists(t.Context(), db)
+	require.NoError(t, err)
+	assert.False(t, exists)
+	require.NoError(t, a.Drop(t.Context(), db), "a database already gone is not an error")
 }

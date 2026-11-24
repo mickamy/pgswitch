@@ -33,3 +33,14 @@ func labelComment(db string, label clone.Label) (string, error) {
 
 	return "comment on database " + quote.Ident(db) + " is " + quote.Literal(string(b)), nil
 }
+
+// parseLabel reads a comment labelComment wrote. ok is false for any other
+// comment.
+func parseLabel(comment string) (label clone.Label, ok bool) {
+	var l labelJSON
+	if err := json.Unmarshal([]byte(comment), &l); err != nil || l.Version != labelVersion {
+		return clone.Label{}, false
+	}
+
+	return clone.Label{Repo: l.Repo, Branch: l.Branch, Database: l.Database}, true
+}

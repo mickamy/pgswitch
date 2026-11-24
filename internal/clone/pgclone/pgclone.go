@@ -141,6 +141,73 @@ func (a Admin) Rename(ctx context.Context, from, to string, label clone.Label) e
 	}
 }
 
+// Labels returns the label of each database a copy or rename labeled, by
+// database name.
+func (a Admin) Labels(ctx context.Context) (map[string]clone.Label, error) {
+	conn, done, err := a.connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+
+	rows, err := conn.Query(ctx, "select datname, shobj_description(oid, 'pg_database') from pg_database"+
+		" where shobj_description(oid, 'pg_database') is not null")
+	if err != nil {
+		return nil, fmt.Errorf("pgclone: %w", err)
+	}
+	labels := make(map[string]clone.Label)
+	for _, row := range rows {
+		if label, ok := parseLabel(row[1].String); ok {
+			labels[row[0].String] = label
+		}
+	}
+
+	return labels, nil
+}
+
+// Staging lists the databases under staging names: copies under way, or left
+// behind by ones that never finished.
+func (a Admin) Staging(ctx context.Context) ([]string, error) {
+	conn, done, err := a.connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+
+	rows, err := conn.Query(ctx, "select datname from pg_database"+
+		" where starts_with(datname::text, "+quote.Literal(stagingPrefix)+") order by datname")
+	if err != nil {
+		return nil, fmt.Errorf("pgclone: %w", err)
+	}
+	names := make([]string, len(rows))
+	for i, row := range rows {
+		names[i] = row[0].String
+	}
+
+	return names, nil
+}
+
+// Drop drops db unless it has sessions, in which case it returns
+// clone.ErrInUse. A database that is already gone is not an error.
+func (a Admin) Drop(ctx context.Context, db string) error {
+	conn, done, err := a.connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer done()
+
+	err = conn.Exec(ctx, "drop database if exists "+quote.Ident(db))
+	var serverErr pgwire.ServerError
+	switch {
+	case err == nil:
+		return nil
+	case errors.As(err, &serverErr) && serverErr.Code == codeObjectInUse:
+		return fmt.Errorf("%w: %w", clone.ErrInUse, err)
+	default:
+		return fmt.Errorf("pgclone: drop %s: %w", db, err)
+	}
+}
+
 // createStaging copies source under a fresh name. It never drops a database it
 // did not create: a name that is taken is skipped, not reclaimed.
 func (a Admin) createStaging(ctx context.Context, conn pgadmin.Conn, source, owner string) (string, error) {

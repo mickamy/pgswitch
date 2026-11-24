@@ -20,6 +20,8 @@ var (
 	// ErrSourceBusy means the source still has sessions, so it cannot be used
 	// as a template yet.
 	ErrSourceBusy = errors.New("clone: source database is in use")
+	// ErrInUse means a database to drop still has sessions.
+	ErrInUse = errors.New("clone: database is in use")
 )
 
 // Label says which repository, branch and requested database a branch
