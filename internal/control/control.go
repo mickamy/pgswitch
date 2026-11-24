@@ -34,6 +34,7 @@ type Connection struct {
 	Repo      string    `json:"repo"`
 	Worktree  string    `json:"worktree"`
 	Branch    string    `json:"branch"`
+	Upstream  string    `json:"upstream"`
 	Database  string    `json:"database"`
 	Requested string    `json:"requested"`
 	PID       int       `json:"pid"`

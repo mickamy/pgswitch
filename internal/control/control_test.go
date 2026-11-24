@@ -49,7 +49,7 @@ func TestStatus(t *testing.T) { //nolint:paralleltest // t.Chdir changes the pro
 
 	since := time.Date(2026, 11, 23, 14, 2, 11, 0, time.UTC)
 	want := control.Status{Connections: []control.Connection{{
-		Repo: "shop", Worktree: "/src/shop-fix-tax", Branch: "fix-tax",
+		Repo: "shop", Worktree: "/src/shop-fix-tax", Branch: "fix-tax", Upstream: "127.0.0.1:5433",
 		Database: "shop_test__fix_tax_708dc013", Requested: "shop_test",
 		PID: 48211, Command: "ruby", Client: "127.0.0.1:50274", Since: since,
 	}}}

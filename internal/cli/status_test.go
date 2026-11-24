@@ -45,12 +45,17 @@ func runCLI(t *testing.T, args ...string) (code int, stdout, stderr string) {
 	return code, out.String(), errOut.String()
 }
 
+const shopAt = "127.0.0.1:5433"
+
 var sampleStatus = control.Status{Connections: []control.Connection{
-	{Repo: "shop", Worktree: "/src/shop", Branch: "main", Database: "shop_development", PID: 1},
-	{Repo: "shop", Worktree: "/src/shop", Branch: "main", Database: "shop_development", PID: 2},
-	{Repo: "shop", Worktree: "/src/shop-fix-tax", Branch: "fix-tax", Database: "shop_test__fix_tax_708dc013"},
-	{Repo: "shop", Worktree: "/src/shop", Branch: "", Database: "shop_test"},
-	{Database: "postgres", Since: time.Date(2026, 11, 23, 14, 2, 11, 0, time.UTC)},
+	{Repo: "shop", Worktree: "/src/shop", Branch: "main", Upstream: shopAt, Database: "shop_development", PID: 1},
+	{Repo: "shop", Worktree: "/src/shop", Branch: "main", Upstream: shopAt, Database: "shop_development", PID: 2},
+	{
+		Repo: "shop", Worktree: "/src/shop-fix-tax", Branch: "fix-tax", Upstream: shopAt,
+		Database: "shop_test__fix_tax_708dc013",
+	},
+	{Repo: "shop", Worktree: "/src/shop", Branch: "", Upstream: shopAt, Database: "shop_test"},
+	{Upstream: "127.0.0.1:5432", Database: "postgres", Since: time.Date(2026, 11, 23, 14, 2, 11, 0, time.UTC)},
 }}
 
 func TestStatusTable(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
@@ -66,11 +71,11 @@ func TestStatusTable(t *testing.T) { //nolint:paralleltest // t.Chdir changes th
 		fields[i] = strings.Fields(l)
 	}
 	assert.Equal(t, [][]string{
-		{"REPO", "WORKTREE", "BRANCH", "DATABASE", "CONNS"},
-		{"-", "(no", "worktree)", "-", "postgres", "1"},
-		{"shop", "/src/shop", "main", "shop_development", "2"},
-		{"shop", "/src/shop", "(detached)", "shop_test", "1"},
-		{"shop", "/src/shop-fix-tax", "fix-tax", "shop_test__fix_tax_708dc013", "1"},
+		{"REPO", "WORKTREE", "BRANCH", "UPSTREAM", "DATABASE", "CONNS"},
+		{"-", "(no", "worktree)", "-", "127.0.0.1:5432", "postgres", "1"},
+		{"shop", "/src/shop", "main", "127.0.0.1:5433", "shop_development", "2"},
+		{"shop", "/src/shop", "(detached)", "127.0.0.1:5433", "shop_test", "1"},
+		{"shop", "/src/shop-fix-tax", "fix-tax", "127.0.0.1:5433", "shop_test__fix_tax_708dc013", "1"},
 	}, fields)
 }
 
