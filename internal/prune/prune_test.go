@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -241,4 +243,86 @@ func sorted(cs ...prune.Candidate) []prune.Candidate {
 	slices.SortFunc(cs, func(a, b prune.Candidate) int { return cmp.Compare(a.Database, b.Database) })
 
 	return cs
+}
+
+// within fails the test unless fn returns in a few seconds.
+func within(t *testing.T, fn func()) {
+	t.Helper()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		require.FailNow(t, "still waiting on a stuck upstream")
+	}
+}
+
+// stuckAdmin is a server that accepts connections and never answers.
+type stuckAdmin struct{}
+
+func (stuckAdmin) Labels(ctx context.Context) (map[string]clone.Label, error) {
+	<-ctx.Done()
+
+	return nil, fmt.Errorf("stuck: %w", ctx.Err())
+}
+
+func (stuckAdmin) AbandonedStaging(ctx context.Context) ([]string, error) {
+	<-ctx.Done()
+
+	return nil, fmt.Errorf("stuck: %w", ctx.Err())
+}
+
+func TestCandidatesDoNotWaitOnAStuckUpstream(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t)
+	db, label := branchDB(repo, "gone")
+	p := prune.WithTimeout(newPruner(map[string]prune.Server{
+		"127.0.0.1:5431": {Admin: stuckAdmin{}},
+		"127.0.0.1:5432": {Admin: stuckAdmin{}},
+		shopUpstream:     {Admin: fakeAdmin{labels: map[string]clone.Label{db: label}}},
+	}), 50*time.Millisecond)
+
+	start := time.Now()
+	var got []prune.Candidate
+	var skipped []prune.Skipped
+	within(t, func() { got, skipped = p.Candidates(t.Context()) })
+
+	assert.Less(t, time.Since(start), time.Second, "the stuck upstreams are waited on together")
+	assert.Equal(t, []prune.Candidate{
+		{Upstream: shopUpstream, Database: db, Label: label, Reason: prune.BranchGone},
+	}, got)
+	require.Len(t, skipped, 2)
+	for _, s := range skipped {
+		assert.ErrorIs(t, s.Err, context.DeadlineExceeded, s.Upstream)
+	}
+}
+
+func TestDropDoesNotWaitOnAStuckUpstream(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t)
+	db, label := branchDB(repo, "gone")
+	dropper := &fakeDropper{}
+	p := prune.WithTimeout(newPruner(map[string]prune.Server{
+		"127.0.0.1:5431": {Admin: stuckAdmin{}},
+		shopUpstream:     {Admin: fakeAdmin{labels: map[string]clone.Label{db: label}}, Dropper: dropper},
+	}), 50*time.Millisecond)
+
+	var got []prune.Outcome
+	within(t, func() {
+		got = p.Drop(t.Context(), []prune.Target{
+			{Upstream: "127.0.0.1:5431", Database: db},
+			{Upstream: shopUpstream, Database: db},
+		})
+	})
+
+	require.Len(t, got, 2)
+	assert.False(t, got[0].Dropped)
+	assert.Contains(t, got[0].Kept, context.DeadlineExceeded.Error())
+	assert.Equal(t, prune.Outcome{Upstream: shopUpstream, Database: db, Dropped: true}, got[1])
 }

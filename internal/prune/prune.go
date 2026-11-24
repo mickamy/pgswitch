@@ -10,6 +10,8 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"sync"
+	"time"
 
 	"github.com/mickamy/pgswitch/internal/clone"
 	"github.com/mickamy/pgswitch/internal/git"
@@ -56,6 +58,10 @@ type Skipped struct {
 	Err      error
 }
 
+// inspectTimeout bounds looking at one upstream, so a server that accepts
+// connections but never answers holds up only itself.
+const inspectTimeout = 10 * time.Second
+
 const (
 	keptInUse           = "in use"
 	keptNotCandidate    = "no longer a candidate"
@@ -85,30 +91,44 @@ type Server struct {
 type Pruner struct {
 	logger  *slog.Logger
 	servers func() map[string]Server
+	timeout time.Duration
 }
 
 // New returns a pruner that looks at the servers, by address, servers returns
 // at the time.
 func New(logger *slog.Logger, servers func() map[string]Server) Pruner {
-	return Pruner{logger: logger, servers: servers}
+	return Pruner{logger: logger, servers: servers, timeout: inspectTimeout}
 }
 
 // Candidates lists the databases to drop, by upstream and name, and the
 // upstreams it could not look at. A database it cannot judge is left out.
 func (p Pruner) Candidates(ctx context.Context) ([]Candidate, []Skipped) {
 	servers := p.servers()
+	addrs := slices.Sorted(maps.Keys(servers))
+
+	type inspection struct {
+		candidates []Candidate
+		err        error
+	}
+	inspections := make([]inspection, len(addrs))
+	var wg sync.WaitGroup
+	for i, addr := range addrs {
+		wg.Go(func() {
+			inspections[i].candidates, inspections[i].err = p.candidatesOn(ctx, addr, servers[addr])
+		})
+	}
+	wg.Wait()
 
 	var candidates []Candidate
 	var skipped []Skipped
-	for _, addr := range slices.Sorted(maps.Keys(servers)) {
-		on, err := p.candidatesOn(ctx, addr, servers[addr])
-		if err != nil {
+	for i, addr := range addrs {
+		if err := inspections[i].err; err != nil {
 			p.logger.Warn("prune: skipped an upstream", "upstream", addr, "err", err)
 			skipped = append(skipped, Skipped{Upstream: addr, Err: err})
 
 			continue
 		}
-		candidates = append(candidates, on...)
+		candidates = append(candidates, inspections[i].candidates...)
 	}
 
 	return candidates, skipped
@@ -164,6 +184,9 @@ func (p Pruner) Drop(ctx context.Context, targets []Target) []Outcome {
 }
 
 func (p Pruner) candidatesOn(ctx context.Context, addr string, srv Server) ([]Candidate, error) {
+	ctx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+
 	labels, err := srv.Admin.Labels(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("prune: %w", err)
