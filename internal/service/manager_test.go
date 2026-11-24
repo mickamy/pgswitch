@@ -84,7 +84,9 @@ func TestLaunchd(t *testing.T) {
 	}, r.ran)
 
 	r.ran = nil
-	require.NoError(t, m.Uninstall(t.Context()))
+	removed, err := m.Uninstall(t.Context())
+	require.NoError(t, err)
+	assert.True(t, removed)
 	assert.NoFileExists(t, plist)
 	assert.Equal(t, []string{
 		"launchctl print gui/501/io.github.mickamy.pgswitch",
@@ -94,7 +96,9 @@ func TestLaunchd(t *testing.T) {
 	r.ran = nil
 	r.fail["launchctl print gui/501/io.github.mickamy.pgswitch"] = 1
 	r.exit = map[string]int{"launchctl print gui/501/io.github.mickamy.pgswitch": 113}
-	require.NoError(t, m.Uninstall(t.Context()), "uninstalling again is not an error")
+	removed, err = m.Uninstall(t.Context())
+	require.NoError(t, err, "uninstalling again is not an error")
+	assert.False(t, removed, "nothing was there")
 	assert.Equal(t, []string{"launchctl print gui/501/io.github.mickamy.pgswitch"}, r.ran, "nothing loaded to stop")
 }
 
@@ -128,7 +132,7 @@ func TestLaunchdUninstallWhenLaunchctlFails(t *testing.T) {
 			m, err := service.New(e, (&fakeRunner{fail: tt.fail, exit: tt.exit}).run)
 			require.NoError(t, err)
 
-			err = m.Uninstall(t.Context())
+			_, err = m.Uninstall(t.Context())
 
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
@@ -151,7 +155,7 @@ func TestLaunchdUninstallKeepsAJobThatDoesNotStop(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, m.Install(t.Context(), spec))
 
-	err = m.Uninstall(t.Context())
+	_, err = m.Uninstall(t.Context())
 
 	require.ErrorContains(t, err, "launchctl bootout gui/501/io.github.mickamy.pgswitch: failed")
 	assert.FileExists(t, m.UnitPath(), "the unit stays with the job it describes")
@@ -224,7 +228,9 @@ func TestSystemdInstallAndUninstall(t *testing.T) {
 	}, r.ran)
 
 	r.ran = nil
-	require.NoError(t, m.Uninstall(t.Context()))
+	removed, err := m.Uninstall(t.Context())
+	require.NoError(t, err)
+	assert.True(t, removed)
 	assert.NoFileExists(t, m.UnitPath())
 	assert.Equal(t, []string{
 		"systemctl --user disable --now pgswitch.service",
@@ -232,7 +238,9 @@ func TestSystemdInstallAndUninstall(t *testing.T) {
 	}, r.ran)
 
 	r.ran = nil
-	require.NoError(t, m.Uninstall(t.Context()), "uninstalling again is not an error")
+	removed, err = m.Uninstall(t.Context())
+	require.NoError(t, err, "uninstalling again is not an error")
+	assert.False(t, removed, "nothing was there")
 	assert.Empty(t, r.ran, "nothing installed to stop")
 }
 
@@ -244,7 +252,7 @@ func TestSystemdUninstallKeepsAUnitThatDoesNotStop(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, m.Install(t.Context(), spec))
 
-	err = m.Uninstall(t.Context())
+	_, err = m.Uninstall(t.Context())
 
 	require.ErrorContains(t, err, "systemctl --user disable --now pgswitch.service: failed")
 	assert.FileExists(t, m.UnitPath())

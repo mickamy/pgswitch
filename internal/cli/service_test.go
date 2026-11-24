@@ -26,6 +26,7 @@ type fakeManager struct {
 	starts       bool
 	installed    []service.Spec
 	uninstalled  int
+	notInstalled bool
 	uninstallErr error
 }
 
@@ -40,10 +41,10 @@ func (m *fakeManager) Install(_ context.Context, spec service.Spec) error {
 	return nil
 }
 
-func (m *fakeManager) Uninstall(context.Context) error {
+func (m *fakeManager) Uninstall(context.Context) (bool, error) {
 	m.uninstalled++
 
-	return m.uninstallErr
+	return !m.notInstalled && m.uninstallErr == nil, m.uninstallErr
 }
 
 func (m *fakeManager) UnitPath() string {
@@ -117,6 +118,17 @@ func TestServiceUninstall(t *testing.T) { //nolint:paralleltest // t.Chdir chang
 	assert.Equal(t, ""+
 		"✔ pgswitch is stopped and /Users/me/Library/LaunchAgents/io.github.mickamy.pgswitch.plist is removed\n"+
 		"  the admin password stays in admin-password; delete it if serve no longer needs it\n", out)
+}
+
+func TestServiceUninstallWhenNotInstalled(t *testing.T) { //nolint:paralleltest // t.Chdir changes the cwd
+	t.Chdir(t.TempDir())
+	cli.StubServices(t, &fakeManager{t: t, notInstalled: true}, binary, ".", time.Second)
+
+	code, out, stderr := runCLI(t, "service", "uninstall")
+
+	require.Equal(t, exit.OK, code, stderr)
+	assert.Equal(t,
+		"pgswitch was not installed as a service (/Users/me/Library/LaunchAgents/io.github.mickamy.pgswitch.plist)\n", out)
 }
 
 func TestServiceUninstallThatDoesNotStop(t *testing.T) { //nolint:paralleltest // t.Chdir changes the cwd

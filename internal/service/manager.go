@@ -41,10 +41,10 @@ func Exec(ctx context.Context, name string, args ...string) error {
 type Manager interface {
 	// Install writes the unit for spec and (re)starts it.
 	Install(ctx context.Context, spec Spec) error
-	// Uninstall stops the service and removes its unit. A service that is
-	// not installed is not an error; one that does not stop is, and keeps
-	// its unit.
-	Uninstall(ctx context.Context) error
+	// Uninstall stops the service and removes its unit, and reports whether
+	// there was anything to stop or remove. A service that is not installed
+	// is not an error; one that does not stop is, and keeps its unit.
+	Uninstall(ctx context.Context) (bool, error)
 	// UnitPath is where the unit is written.
 	UnitPath() string
 }
@@ -110,18 +110,21 @@ func (l launchd) Install(ctx context.Context, spec Spec) error {
 	return fmt.Errorf("service: %w", err)
 }
 
-func (l launchd) Uninstall(ctx context.Context) error {
+func (l launchd) Uninstall(ctx context.Context) (bool, error) {
 	job := l.domain + "/" + Label
 	err := l.run(ctx, "launchctl", "print", job)
-	if err == nil {
+	loaded := err == nil
+	if loaded {
 		err = l.run(ctx, "launchctl", "bootout", job)
 	}
 	// A job that is not loaded, or no longer, has nothing left to stop.
 	if err != nil && !exitedWith(err, launchctlNoSuchJob) {
-		return fmt.Errorf("service: %w", err)
+		return false, fmt.Errorf("service: %w", err)
 	}
 
-	return removeUnit(l.path)
+	removed, err := removeUnit(l.path)
+
+	return loaded || removed, err
 }
 
 func exitedWith(err error, code int) bool {
@@ -157,21 +160,21 @@ func (s systemd) Install(ctx context.Context, spec Spec) error {
 	return nil
 }
 
-func (s systemd) Uninstall(ctx context.Context) error {
+func (s systemd) Uninstall(ctx context.Context) (bool, error) {
 	if _, err := os.Stat(s.path); errors.Is(err, fs.ErrNotExist) {
-		return nil
+		return false, nil
 	}
 	if err := s.run(ctx, "systemctl", "--user", "disable", "--now", UnitName); err != nil {
-		return fmt.Errorf("service: %w", err)
+		return false, fmt.Errorf("service: %w", err)
 	}
-	if err := removeUnit(s.path); err != nil {
-		return err
+	if _, err := removeUnit(s.path); err != nil {
+		return true, err
 	}
 	if err := s.run(ctx, "systemctl", "--user", "daemon-reload"); err != nil {
-		return fmt.Errorf("service: %w", err)
+		return true, fmt.Errorf("service: %w", err)
 	}
 
-	return nil
+	return true, nil
 }
 
 func writeUnit(path string, content []byte) error {
@@ -185,10 +188,15 @@ func writeUnit(path string, content []byte) error {
 	return nil
 }
 
-func removeUnit(path string) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("service: %w", err)
+// removeUnit removes the unit at path and reports whether there was one.
+func removeUnit(path string) (bool, error) {
+	err := os.Remove(path)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	default:
+		return false, fmt.Errorf("service: %w", err)
 	}
-
-	return nil
 }

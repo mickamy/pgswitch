@@ -159,10 +159,15 @@ func runServiceUninstall(ctx context.Context, args []string, std IO) int {
 	if err != nil {
 		return fail(std, err)
 	}
-	if err := m.Uninstall(ctx); err != nil {
+	removed, err := m.Uninstall(ctx)
+	if err != nil {
 		return fail(std, err)
 	}
-	fmt.Fprintf(std.Out, "✔ pgswitch is stopped and %s is removed\n", m.UnitPath())
+	if removed {
+		fmt.Fprintf(std.Out, "✔ pgswitch is stopped and %s is removed\n", m.UnitPath())
+	} else {
+		fmt.Fprintf(std.Out, "pgswitch was not installed as a service (%s)\n", m.UnitPath())
+	}
 	if path, err := services.passwordFile(); err == nil {
 		if _, err := os.Stat(path); err == nil {
 			fmt.Fprintf(std.Out, "  the admin password stays in %s; delete it if serve no longer needs it\n", path)
