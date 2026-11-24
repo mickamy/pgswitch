@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/mickamy/pgswitch/internal/clone"
 	"github.com/mickamy/pgswitch/internal/clone/pgclone"
 	"github.com/mickamy/pgswitch/internal/pgadmin"
 )
@@ -103,7 +104,7 @@ func TestCopySkipsATakenStagingName(t *testing.T) {
 		return name
 	})
 
-	require.NoError(t, a.Copy(t.Context(), source, target))
+	require.NoError(t, a.Copy(t.Context(), source, target, clone.Label{}))
 
 	assert.True(t, exists(t, admin, target))
 	assert.False(t, exists(t, admin, fresh), "the staging database was renamed into place")

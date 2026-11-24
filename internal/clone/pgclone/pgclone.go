@@ -82,7 +82,7 @@ func (a Admin) Terminate(ctx context.Context, db string) (int, error) {
 // database-level settings and privileges, which CREATE DATABASE does not copy.
 // It builds the copy under a staging name and renames it once complete, so no
 // connection reaches a half-configured target.
-func (a Admin) Copy(ctx context.Context, source, target string) error {
+func (a Admin) Copy(ctx context.Context, source, target string, label clone.Label) error {
 	conn, done, err := a.connect(ctx)
 	if err != nil {
 		return err
@@ -107,7 +107,7 @@ func (a Admin) Copy(ctx context.Context, source, target string) error {
 		return err
 	}
 
-	if err := finish(ctx, conn, source, staging, target, owner); err != nil {
+	if err := finish(ctx, conn, source, staging, target, owner, label); err != nil {
 		_ = dropDatabase(context.WithoutCancel(ctx), conn, staging)
 
 		return err
@@ -116,15 +116,20 @@ func (a Admin) Copy(ctx context.Context, source, target string) error {
 	return nil
 }
 
-// Rename renames from to to.
-func (a Admin) Rename(ctx context.Context, from, to string) error {
+// Rename gives from the name to and relabels it, in one transaction.
+func (a Admin) Rename(ctx context.Context, from, to string, label clone.Label) error {
+	comment, err := labelComment(to, label)
+	if err != nil {
+		return err
+	}
+
 	conn, done, err := a.connect(ctx)
 	if err != nil {
 		return err
 	}
 	defer done()
 
-	err = conn.Exec(ctx, "alter database "+quote.Ident(from)+" rename to "+quote.Ident(to))
+	err = conn.Exec(ctx, "alter database "+quote.Ident(from)+" rename to "+quote.Ident(to)+"; "+comment)
 	var serverErr pgwire.ServerError
 	switch {
 	case err == nil:
@@ -163,15 +168,22 @@ func (a Admin) createStaging(ctx context.Context, conn pgadmin.Conn, source, own
 
 // finish copies what CREATE DATABASE leaves behind, then publishes staging as
 // target.
-func finish(ctx context.Context, conn pgadmin.Conn, source, staging, target, owner string) error {
+func finish(ctx context.Context, conn pgadmin.Conn, source, staging, target, owner string, label clone.Label) error {
 	if err := copyPrivileges(ctx, conn, source, staging, owner); err != nil {
 		return err
 	}
 	if err := copySettings(ctx, conn, source, staging); err != nil {
 		return err
 	}
+	comment, err := labelComment(staging, label)
+	if err != nil {
+		return err
+	}
+	if err := conn.Exec(ctx, comment); err != nil {
+		return fmt.Errorf("pgclone: label %s: %w", target, err)
+	}
 
-	err := conn.Exec(ctx, "alter database "+quote.Ident(staging)+" rename to "+quote.Ident(target))
+	err = conn.Exec(ctx, "alter database "+quote.Ident(staging)+" rename to "+quote.Ident(target))
 	var serverErr pgwire.ServerError
 	if errors.As(err, &serverErr) && serverErr.Code == codeDuplicateDatabase {
 		return dropDatabase(ctx, conn, staging)

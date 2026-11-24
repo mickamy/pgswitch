@@ -19,12 +19,15 @@ const (
 	target = "shop_development__fix_tax_708dc013"
 )
 
+var label = clone.Label{Repo: "/src/shop/.git", Branch: "fix-tax", Database: source}
+
 type fakeAdmin struct {
 	mu         sync.Mutex
 	dbs        map[string]bool
 	busy       int // Copy and Rename report ErrSourceBusy this many times first
 	copies     []string
 	renames    []string
+	labels     map[string]clone.Label
 	terminated int
 
 	// When gate is set, Copy signals started and blocks until gate closes.
@@ -40,7 +43,7 @@ type fakeAdmin struct {
 var _ clone.Admin = (*fakeAdmin)(nil)
 
 func newFakeAdmin(dbs ...string) *fakeAdmin {
-	a := &fakeAdmin{dbs: make(map[string]bool)}
+	a := &fakeAdmin{dbs: make(map[string]bool), labels: make(map[string]clone.Label)}
 	for _, db := range dbs {
 		a.dbs[db] = true
 	}
@@ -69,7 +72,7 @@ func (a *fakeAdmin) Terminate(context.Context, string) (int, error) {
 	return 1, nil
 }
 
-func (a *fakeAdmin) Copy(ctx context.Context, src, dst string) error {
+func (a *fakeAdmin) Copy(ctx context.Context, src, dst string, l clone.Label) error {
 	if a.gate != nil {
 		a.started <- struct{}{}
 		select {
@@ -89,11 +92,12 @@ func (a *fakeAdmin) Copy(ctx context.Context, src, dst string) error {
 	}
 	a.copies = append(a.copies, src+"->"+dst)
 	a.dbs[dst] = true
+	a.labels[dst] = l
 
 	return nil
 }
 
-func (a *fakeAdmin) Rename(ctx context.Context, from, to string) error {
+func (a *fakeAdmin) Rename(ctx context.Context, from, to string, l clone.Label) error {
 	if a.gate != nil {
 		a.started <- struct{}{}
 		select {
@@ -113,7 +117,9 @@ func (a *fakeAdmin) Rename(ctx context.Context, from, to string) error {
 	}
 	a.renames = append(a.renames, from+"->"+to)
 	delete(a.dbs, from)
+	delete(a.labels, from)
 	a.dbs[to] = true
+	a.labels[to] = l
 
 	return nil
 }
@@ -123,6 +129,13 @@ func (a *fakeAdmin) renamed() []string {
 	defer a.mu.Unlock()
 
 	return append([]string(nil), a.renames...)
+}
+
+func (a *fakeAdmin) labelOf(db string) clone.Label {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.labels[db]
 }
 
 func (a *fakeAdmin) snapshot() (copies []string, terminated int) {
@@ -143,6 +156,7 @@ func TestEnsure(t *testing.T) {
 		admin          *fakeAdmin
 		wantErr        error
 		wantCopies     []string
+		wantLabel      clone.Label
 		wantTerminated int
 	}{
 		"target exists": {
@@ -152,6 +166,7 @@ func TestEnsure(t *testing.T) {
 		"clones a missing target": {
 			admin:          newFakeAdmin(source),
 			wantCopies:     []string{source + "->" + target},
+			wantLabel:      label,
 			wantTerminated: 1,
 		},
 		"retries while the source is busy": {
@@ -162,6 +177,7 @@ func TestEnsure(t *testing.T) {
 				return a
 			}(),
 			wantCopies:     []string{source + "->" + target},
+			wantLabel:      label,
 			wantTerminated: 3,
 		},
 		"missing source": {
@@ -174,7 +190,7 @@ func TestEnsure(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			err := newCloner(tt.admin).Ensure(t.Context(), target, source)
+			err := newCloner(tt.admin).Ensure(t.Context(), target, label, source)
 
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
@@ -183,6 +199,7 @@ func TestEnsure(t *testing.T) {
 			}
 			copies, terminated := tt.admin.snapshot()
 			assert.Equal(t, tt.wantCopies, copies)
+			assert.Equal(t, tt.wantLabel, tt.admin.labelOf(target))
 			assert.Equal(t, tt.wantTerminated, terminated)
 		})
 	}
@@ -195,7 +212,7 @@ func TestEnsureGivesUpWhenTheSourceStaysBusy(t *testing.T) {
 	admin.busy = 1 << 30
 	c := clone.NewWithTiming(admin, slog.New(slog.DiscardHandler), 50*time.Millisecond, time.Millisecond)
 
-	err := c.Ensure(t.Context(), target, source)
+	err := c.Ensure(t.Context(), target, label, source)
 
 	require.ErrorIs(t, err, clone.ErrSourceBusy)
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
@@ -211,7 +228,7 @@ func TestEnsureSharesOneClone(t *testing.T) {
 
 	errs := make(chan error, 3)
 	for range 3 {
-		go func() { errs <- c.Ensure(t.Context(), target, source) }()
+		go func() { errs <- c.Ensure(t.Context(), target, label, source) }()
 	}
 	<-admin.started
 	close(admin.gate)
@@ -232,7 +249,7 @@ func TestWaitBlocksWhileTheSourceIsHeld(t *testing.T) {
 	c := newCloner(admin)
 
 	ensured := make(chan error, 1)
-	go func() { ensured <- c.Ensure(t.Context(), target, source) }()
+	go func() { ensured <- c.Ensure(t.Context(), target, label, source) }()
 	<-admin.started
 
 	require.NoError(t, c.Wait(t.Context(), "other_database"), "other databases are not held")
@@ -260,7 +277,7 @@ func TestWaitHonorsContext(t *testing.T) {
 	t.Cleanup(func() { close(admin.gate) })
 	c := newCloner(admin)
 
-	go func() { _ = c.Ensure(context.WithoutCancel(t.Context()), target, source) }()
+	go func() { _ = c.Ensure(context.WithoutCancel(t.Context()), target, label, source) }()
 	<-admin.started
 
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
@@ -294,7 +311,7 @@ func TestEnsureFallsBackToTheNextSource(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			require.NoError(t, newCloner(tt.admin).Ensure(t.Context(), target, parent, source))
+			require.NoError(t, newCloner(tt.admin).Ensure(t.Context(), target, label, parent, source))
 
 			copies, _ := tt.admin.snapshot()
 			assert.Equal(t, tt.wantCopies, copies)
@@ -311,7 +328,7 @@ func TestEnsureHoldsOnlyTheChosenSource(t *testing.T) {
 	c := newCloner(admin)
 
 	ensured := make(chan error, 1)
-	go func() { ensured <- c.Ensure(t.Context(), target, "missing_parent", source) }()
+	go func() { ensured <- c.Ensure(t.Context(), target, label, "missing_parent", source) }()
 	<-admin.started
 
 	require.NoError(t, c.Wait(t.Context(), "missing_parent"), "a source that was skipped is not held")
@@ -332,16 +349,19 @@ func TestRename(t *testing.T) {
 	t.Parallel()
 
 	const renamed = "shop_development__fix_vat_8c1f02aa"
+	vatLabel := clone.Label{Repo: label.Repo, Branch: "fix-vat", Database: source}
 
 	tests := map[string]struct {
 		admin       *fakeAdmin
 		wantRenames []string
 		wantDBs     map[string]bool
+		wantLabel   clone.Label
 	}{
 		"renames": {
 			admin:       newFakeAdmin(target),
 			wantRenames: []string{target + "->" + renamed},
 			wantDBs:     map[string]bool{renamed: true},
+			wantLabel:   vatLabel,
 		},
 		"retries while busy": {
 			admin: func() *fakeAdmin {
@@ -352,6 +372,7 @@ func TestRename(t *testing.T) {
 			}(),
 			wantRenames: []string{target + "->" + renamed},
 			wantDBs:     map[string]bool{renamed: true},
+			wantLabel:   vatLabel,
 		},
 		"leaves an existing target alone": {
 			admin:   newFakeAdmin(target, renamed),
@@ -367,10 +388,11 @@ func TestRename(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			require.NoError(t, newCloner(tt.admin).Rename(t.Context(), target, renamed))
+			require.NoError(t, newCloner(tt.admin).Rename(t.Context(), target, renamed, vatLabel))
 
 			assert.Equal(t, tt.wantRenames, tt.admin.renamed())
 			assert.Equal(t, tt.wantDBs, tt.admin.dbs)
+			assert.Equal(t, tt.wantLabel, tt.admin.labelOf(renamed))
 		})
 	}
 }
@@ -386,11 +408,11 @@ func TestEnsureWaitsForARenameInsteadOfCloning(t *testing.T) {
 	c := newCloner(admin)
 
 	renaming := make(chan error, 1)
-	go func() { renaming <- c.Rename(t.Context(), target, renamed) }()
+	go func() { renaming <- c.Rename(t.Context(), target, renamed, label) }()
 	<-admin.started
 
 	ensured := make(chan error, 1)
-	go func() { ensured <- c.Ensure(t.Context(), renamed, source) }()
+	go func() { ensured <- c.Ensure(t.Context(), renamed, label, source) }()
 	select {
 	case <-ensured:
 		require.FailNow(t, "Ensure returned while the rename was under way")
@@ -416,11 +438,11 @@ func TestEnsureClonesAfterARenameWithNothingToMove(t *testing.T) {
 	c := newCloner(admin)
 
 	renaming := make(chan error, 1)
-	go func() { renaming <- c.Rename(t.Context(), missingOld, target) }()
+	go func() { renaming <- c.Rename(t.Context(), missingOld, target, label) }()
 	<-admin.existsCalled // the rename is checking for the old database
 
 	ensured := make(chan error, 1)
-	go func() { ensured <- c.Ensure(t.Context(), target, source) }()
+	go func() { ensured <- c.Ensure(t.Context(), target, label, source) }()
 	time.Sleep(20 * time.Millisecond) // let Ensure join the rename's flight
 	close(admin.existsGate)
 

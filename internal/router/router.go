@@ -24,8 +24,8 @@ var shared = map[string]bool{"postgres": true, "template0": true, "template1": t
 
 // Cloner creates a branch database before the first connection to it.
 type Cloner interface {
-	Ensure(ctx context.Context, target string, sources ...string) error
-	Rename(ctx context.Context, from, to string) error
+	Ensure(ctx context.Context, target string, label clone.Label, sources ...string) error
+	Rename(ctx context.Context, from, to string, label clone.Label) error
 	Wait(ctx context.Context, db string) error
 }
 
@@ -89,6 +89,7 @@ func (r Router) Switched(ctx context.Context, commonDir, from, to string) {
 // attribution is what resolve learned about a connection.
 type attribution struct {
 	route proxy.Route
+	label clone.Label
 	// sources are the databases to clone route.Database from, best first.
 	sources []string
 	// renamedFrom is the database route.Database had before a branch rename
@@ -109,12 +110,12 @@ func (r Router) Route(ctx context.Context, client, server net.Addr, database str
 	physical := a.route.Database
 	if a.renamedFrom != "" {
 		// The same flight as the watcher's, whichever comes first.
-		if err := r.cloner.Rename(ctx, a.renamedFrom, physical); err != nil {
+		if err := r.cloner.Rename(ctx, a.renamedFrom, physical, a.label); err != nil {
 			r.logger.Warn("follow branch rename", "database", database, "err", err)
 		}
 	}
 	if physical != database {
-		err := r.cloner.Ensure(ctx, physical, a.sources...)
+		err := r.cloner.Ensure(ctx, physical, a.label, a.sources...)
 		switch {
 		case errors.Is(err, clone.ErrSourceMissing):
 			r.logger.Warn("nothing to clone from", "database", database, "physical", physical)
@@ -204,7 +205,12 @@ func (r Router) resolve(ctx context.Context, client, server net.Addr, database s
 	}
 	logger.Debug("attributed", "worktree", wt.Root, "branch", branch, "physical", rt.Database)
 
-	return attribution{route: rt, sources: sources, renamedFrom: renamedFrom}
+	return attribution{
+		route:       rt,
+		label:       clone.Label{Repo: wt.CommonDir, Branch: branch, Database: database},
+		sources:     sources,
+		renamedFrom: renamedFrom,
+	}
 }
 
 // followRename moves each database the repository's connections used from
@@ -229,7 +235,8 @@ func (r Router) followRename(ctx context.Context, commonDir, from, to string) {
 	for _, db := range r.databases.of(commonDir) {
 		oldName := route.PhysicalName(db, from, defaultBranch)
 		newName := route.PhysicalName(db, to, defaultBranch)
-		if err := r.cloner.Rename(ctx, oldName, newName); err != nil {
+		label := clone.Label{Repo: commonDir, Branch: to, Database: db}
+		if err := r.cloner.Rename(ctx, oldName, newName, label); err != nil {
 			logger.Warn("follow branch rename", "database", db, "err", err)
 		}
 	}

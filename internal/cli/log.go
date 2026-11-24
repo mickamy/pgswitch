@@ -2,7 +2,8 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"io"
 	"maps"
@@ -36,7 +37,7 @@ func runLog(ctx context.Context, args []string, std IO) int {
 	// event, or never with -f; it is told apart from an interrupt by writeErr.
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
-	enc := json.NewEncoder(std.Out)
+	enc := jsontext.NewEncoder(std.Out, jsontext.AllowInvalidUTF8(true))
 	var writeErr error
 	emit := func(e events.Event) {
 		if writeErr != nil {
@@ -44,7 +45,7 @@ func runLog(ctx context.Context, args []string, std IO) int {
 		}
 		var err error
 		if *asJSON {
-			err = enc.Encode(e)
+			err = json.MarshalEncode(enc, e)
 		} else {
 			_, err = fmt.Fprintln(std.Out, formatEvent(e))
 		}

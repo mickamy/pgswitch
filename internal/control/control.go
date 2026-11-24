@@ -2,7 +2,8 @@ package control
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -133,7 +134,7 @@ func Serve(ctx context.Context, ln net.Listener, src Source) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+statusPath, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(src.Status())
+		_ = json.MarshalWrite(w, src.Status(), jsontext.AllowInvalidUTF8(true))
 	})
 	mux.HandleFunc("GET "+logPath, func(w http.ResponseWriter, r *http.Request) {
 		serveLog(ctx.Done(), w, r, src.Events)
@@ -158,11 +159,11 @@ func Serve(ctx context.Context, ln net.Listener, src Source) error {
 // that come after, until the client leaves or stopped closes.
 func serveLog(stopped <-chan struct{}, w http.ResponseWriter, r *http.Request, log *events.Log) {
 	w.Header().Set("Content-Type", "application/x-ndjson")
-	enc := json.NewEncoder(w)
+	enc := jsontext.NewEncoder(w, jsontext.AllowInvalidUTF8(true))
 
 	if r.URL.Query().Get("follow") == "" {
 		for _, e := range log.Recent() {
-			if err := enc.Encode(e); err != nil {
+			if err := json.MarshalEncode(enc, e); err != nil {
 				return
 			}
 		}
@@ -173,7 +174,7 @@ func serveLog(stopped <-chan struct{}, w http.ResponseWriter, r *http.Request, l
 	recent, next := log.Follow(r.Context())
 	flusher, _ := w.(http.Flusher)
 	for _, e := range recent {
-		if err := enc.Encode(e); err != nil {
+		if err := json.MarshalEncode(enc, e); err != nil {
 			return
 		}
 	}
@@ -186,7 +187,7 @@ func serveLog(stopped <-chan struct{}, w http.ResponseWriter, r *http.Request, l
 			if !ok {
 				return
 			}
-			if err := enc.Encode(e); err != nil {
+			if err := json.MarshalEncode(enc, e); err != nil {
 				return
 			}
 		case <-stopped:
@@ -226,7 +227,7 @@ func (c Client) Status(ctx context.Context) (Status, error) {
 		return Status{}, fmt.Errorf("control: status: %s", resp.Status)
 	}
 	var s Status
-	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+	if err := json.UnmarshalRead(resp.Body, &s); err != nil {
 		return Status{}, fmt.Errorf("control: %w", err)
 	}
 
@@ -253,10 +254,10 @@ func (c Client) Log(ctx context.Context, follow bool, fn func(events.Event)) err
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("control: log: %s", resp.Status)
 	}
-	dec := json.NewDecoder(resp.Body)
+	dec := jsontext.NewDecoder(resp.Body)
 	for {
 		var e events.Event
-		err := dec.Decode(&e)
+		err := json.UnmarshalDecode(dec, &e)
 		switch {
 		case errors.Is(err, io.EOF), err != nil && ctx.Err() != nil:
 			return nil

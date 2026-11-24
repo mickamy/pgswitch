@@ -22,17 +22,26 @@ var (
 	ErrSourceBusy = errors.New("clone: source database is in use")
 )
 
+// Label says which repository, branch and requested database a branch
+// database belongs to, so it can be found again once the branch is gone.
+type Label struct {
+	// Repo is the repository's common git directory.
+	Repo     string
+	Branch   string
+	Database string
+}
+
 // Admin is what cloning needs from the database server.
 type Admin interface {
 	Exists(ctx context.Context, db string) (bool, error)
 	// Terminate ends every session on db and reports how many it ended.
 	Terminate(ctx context.Context, db string) (int, error)
-	// Copy creates target from source. It returns ErrSourceBusy while source
-	// has sessions.
-	Copy(ctx context.Context, source, target string) error
-	// Rename renames from to to. It returns ErrSourceBusy while from has
-	// sessions.
-	Rename(ctx context.Context, from, to string) error
+	// Copy creates target from source, labeled. It returns ErrSourceBusy
+	// while source has sessions.
+	Copy(ctx context.Context, source, target string, label Label) error
+	// Rename gives from the name to and relabels it. It returns ErrSourceBusy
+	// while from has sessions.
+	Rename(ctx context.Context, from, to string, label Label) error
 }
 
 // Cloner creates branch databases on demand. While it copies a source, new
@@ -73,7 +82,7 @@ func New(admin Admin, logger *slog.Logger) *Cloner {
 // sources that exists. Concurrent calls for one target share a single clone.
 // The flight it joins may be a rename that found nothing to move, so it checks
 // again after each one.
-func (c *Cloner) Ensure(ctx context.Context, target string, sources ...string) error {
+func (c *Cloner) Ensure(ctx context.Context, target string, label Label, sources ...string) error {
 	for range ensureAttempts {
 		exists, err := c.admin.Exists(ctx, target)
 		if err != nil {
@@ -83,7 +92,7 @@ func (c *Cloner) Ensure(ctx context.Context, target string, sources ...string) e
 			return nil
 		}
 
-		err = c.join(ctx, target, func(ctx context.Context) error { return c.clone(ctx, target, sources) })
+		err = c.join(ctx, target, func(ctx context.Context) error { return c.clone(ctx, target, label, sources) })
 		if err != nil {
 			return err
 		}
@@ -95,8 +104,8 @@ func (c *Cloner) Ensure(ctx context.Context, target string, sources ...string) e
 // Rename renames from to to, as when a branch is renamed, unless to already
 // exists or from does not. Until it is done, Ensure for to waits rather than
 // clones, and connections to from wait as for a clone.
-func (c *Cloner) Rename(ctx context.Context, from, to string) error {
-	return c.join(ctx, to, func(ctx context.Context) error { return c.rename(ctx, from, to) })
+func (c *Cloner) Rename(ctx context.Context, from, to string, label Label) error {
+	return c.join(ctx, to, func(ctx context.Context) error { return c.rename(ctx, from, to, label) })
 }
 
 // Wait blocks while db is held as the source of a clone.
@@ -151,7 +160,7 @@ func (c *Cloner) fly(ctx context.Context, f *flight, target string, run func(con
 	close(f.done)
 }
 
-func (c *Cloner) clone(ctx context.Context, target string, sources []string) error {
+func (c *Cloner) clone(ctx context.Context, target string, label Label, sources []string) error {
 	// A flight that just finished may have created target after the caller
 	// checked.
 	exists, err := c.admin.Exists(ctx, target)
@@ -168,11 +177,11 @@ func (c *Cloner) clone(ctx context.Context, target string, sources []string) err
 	}
 
 	return c.free(ctx, source, "clone", func(ctx context.Context) error {
-		return c.admin.Copy(ctx, source, target)
+		return c.admin.Copy(ctx, source, target, label)
 	}, "source", source, "target", target)
 }
 
-func (c *Cloner) rename(ctx context.Context, from, to string) error {
+func (c *Cloner) rename(ctx context.Context, from, to string, label Label) error {
 	exists, err := c.admin.Exists(ctx, to)
 	if err != nil {
 		return fmt.Errorf("clone: check %s: %w", to, err)
@@ -189,7 +198,7 @@ func (c *Cloner) rename(ctx context.Context, from, to string) error {
 	}
 
 	return c.free(ctx, from, "rename", func(ctx context.Context) error {
-		return c.admin.Rename(ctx, from, to)
+		return c.admin.Rename(ctx, from, to, label)
 	}, "from", from, "to", to)
 }
 

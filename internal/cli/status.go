@@ -3,7 +3,8 @@ package cli
 import (
 	"cmp"
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"io"
 	"os"
@@ -37,9 +38,8 @@ func runStatus(ctx context.Context, args []string, std IO) int {
 	}
 
 	if *asJSON {
-		enc := json.NewEncoder(std.Out)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(s); err != nil {
+		enc := jsontext.NewEncoder(std.Out, jsontext.WithIndent("  "), jsontext.AllowInvalidUTF8(true))
+		if err := json.MarshalEncode(enc, s); err != nil {
 			return fail(std, err)
 		}
 
