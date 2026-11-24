@@ -86,9 +86,13 @@ func runServe(ctx context.Context, args []string, std IO) int {
 			Events: recent,
 			Pruner: pruneSource{p: prune.New(logger, admin, cloner)},
 		}
-		if err := serveControl(ctx, *controlPath, src, logger); err != nil {
+		stopped, err := serveControl(ctx, *controlPath, src, logger)
+		if err != nil {
 			return fail(std, err)
 		}
+		// Returning before the socket is closed would leave it to be removed
+		// later, by whatever path it names by then.
+		defer stopped()
 	}
 
 	logger.Info("serving", "listen", ln.Addr().String(), "upstream", *upstream, "admin_user", *adminUser)
@@ -122,22 +126,24 @@ func defaultControl() string {
 }
 
 // serveControl answers status, log and prune on the socket at path until ctx
-// ends.
-func serveControl(ctx context.Context, path string, src control.Source, logger *slog.Logger) error {
+// ends. The func it returns waits until the socket is closed.
+func serveControl(ctx context.Context, path string, src control.Source, logger *slog.Logger) (func(), error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("control socket: %w", err)
+		return nil, fmt.Errorf("control socket: %w", err)
 	}
 	ln, err := control.Listen(ctx, path)
 	if err != nil {
-		return fmt.Errorf("control socket: %w", err)
+		return nil, fmt.Errorf("control socket: %w", err)
 	}
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		if err := control.Serve(ctx, ln, src); err != nil {
 			logger.Warn("control socket", "err", err)
 		}
 	}()
 
-	return nil
+	return func() { <-done }, nil
 }
 
 func currentUser() string {
