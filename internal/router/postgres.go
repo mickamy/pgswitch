@@ -19,16 +19,17 @@ const (
 	foundFor = 5 * time.Second
 )
 
-// PostgresFinder finds a repository's Postgres in Docker, among containers
-// started from inside roots.
-type PostgresFinder interface {
+// Docker is what the router asks Docker: a repository's Postgres, among the
+// containers started from inside roots, and the container a relay declared.
+type Docker interface {
 	FindPostgres(ctx context.Context, roots []string) (docker.Postgres, bool, error)
+	Inspect(ctx context.Context, id string) (docker.Container, error)
 }
 
 // postgresCache remembers, per repository, what the finder last said.
 type postgresCache struct {
 	logger *slog.Logger
-	finder PostgresFinder
+	finder Docker
 	now    func() time.Time
 
 	mu     sync.Mutex
@@ -41,7 +42,7 @@ type found struct {
 	at       time.Time
 }
 
-func newPostgresCache(logger *slog.Logger, finder PostgresFinder) *postgresCache {
+func newPostgresCache(logger *slog.Logger, finder Docker) *postgresCache {
 	return &postgresCache{logger: logger, finder: finder, now: time.Now, byRepo: make(map[string]found)}
 }
 

@@ -118,6 +118,22 @@ func (p Proxy) handle(ctx context.Context, client net.Conn) {
 
 		return
 	}
+	// pgswitch relay declares the container first, then relays its client.
+	if pkt.Kind() == pgwire.KindRelayDeclaration {
+		id, err := pkt.ContainerID()
+		if err != nil {
+			reject(client, logger, pgwire.CodeProtocolViolation, err.Error())
+
+			return
+		}
+		ctx = WithContainer(ctx, id)
+		logger = logger.With("container", id)
+		if pkt, err = negotiate(client); err != nil {
+			logNegotiationError(logger, err)
+
+			return
+		}
+	}
 
 	switch pkt.Kind() {
 	case pgwire.KindCancelRequest:
@@ -125,6 +141,10 @@ func (p Proxy) handle(ctx context.Context, client net.Conn) {
 
 		return
 	case pgwire.KindStartup:
+	case pgwire.KindRelayDeclaration:
+		reject(client, logger, pgwire.CodeProtocolViolation, "relay declaration sent twice")
+
+		return
 	case pgwire.KindUnknown, pgwire.KindSSLRequest, pgwire.KindGSSENCRequest:
 		reject(client, logger, pgwire.CodeProtocolViolation, fmt.Sprintf("unsupported request code %d", pkt.Code))
 

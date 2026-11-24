@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mickamy/pgswitch/internal/clone"
+	"github.com/mickamy/pgswitch/internal/docker"
 	"github.com/mickamy/pgswitch/internal/git"
 	"github.com/mickamy/pgswitch/internal/git/ref"
 	"github.com/mickamy/pgswitch/internal/peer"
@@ -45,6 +46,7 @@ type Router struct {
 	// byDefault is the upstream of connections whose repository names none.
 	byDefault upstream.Upstream
 	cloners   func(upstream.Upstream) Cloner
+	docker    Docker
 	postgres  *postgresCache
 	watcher   Watcher
 	lookup    lookupFunc
@@ -56,17 +58,19 @@ type lookupFunc func(ctx context.Context, client, server netip.AddrPort) (peer.P
 
 var _ proxy.Router = Router{}
 
-// New returns a router that clones through cloners(u), one per upstream u,
-// and finds the upstream of a repository whose configuration names none
-// through postgres, when it is not nil.
+// New returns a router that clones through cloners(u), one per upstream u.
+// Through dockerAPI, when it is not nil, it finds the upstream of a
+// repository whose configuration names none, and the worktree of a container
+// a relay declares.
 func New(logger *slog.Logger, byDefault upstream.Upstream, cloners func(upstream.Upstream) Cloner,
-	postgres PostgresFinder, watcher Watcher,
+	dockerAPI Docker, watcher Watcher,
 ) Router {
 	return Router{
 		logger:    logger,
 		byDefault: byDefault,
 		cloners:   cloners,
-		postgres:  newPostgresCache(logger, postgres),
+		docker:    dockerAPI,
+		postgres:  newPostgresCache(logger, dockerAPI),
 		watcher:   watcher,
 		lookup:    peer.Lookup,
 		switches:  newSwitches(),
@@ -161,14 +165,7 @@ func (r Router) resolve(ctx context.Context, client, server net.Addr, database s
 	rt := proxy.Route{Database: database, Upstream: r.byDefault.Addr}
 	byDefault := attribution{route: rt, upstream: r.byDefault}
 
-	clientTCP, okClient := client.(*net.TCPAddr)
-	serverTCP, okServer := server.(*net.TCPAddr)
-	if !okClient || !okServer {
-		logger.Warn("unattributed connection", "reason", "not a TCP connection")
-
-		return byDefault
-	}
-	proc, err := r.lookup(ctx, clientTCP.AddrPort(), serverTCP.AddrPort())
+	proc, err := r.origin(ctx, client, server)
 	if err != nil {
 		logger.Warn("unattributed connection", "err", err)
 
@@ -254,6 +251,48 @@ func (r Router) resolve(ctx context.Context, client, server net.Addr, database s
 		sources:     sources,
 		renamedFrom: renamedFrom,
 	}
+}
+
+// origin returns what opened the connection: the process on the other end,
+// or, for a connection a relay declared, its container, whose Compose
+// working directory stands in for the process's.
+func (r Router) origin(ctx context.Context, client, server net.Addr) (peer.Process, error) {
+	if id, ok := proxy.Container(ctx); ok {
+		return r.container(ctx, id)
+	}
+
+	clientTCP, okClient := client.(*net.TCPAddr)
+	serverTCP, okServer := server.(*net.TCPAddr)
+	if !okClient || !okServer {
+		return peer.Process{}, errors.New("router: not a TCP connection")
+	}
+	proc, err := r.lookup(ctx, clientTCP.AddrPort(), serverTCP.AddrPort())
+	if err != nil {
+		return peer.Process{}, fmt.Errorf("router: %w", err)
+	}
+
+	return proc, nil
+}
+
+func (r Router) container(ctx context.Context, id string) (peer.Process, error) {
+	if r.docker == nil {
+		return peer.Process{}, fmt.Errorf("router: container %s declared, and no Docker to ask", id)
+	}
+	ctx, cancel := context.WithTimeout(ctx, findTimeout)
+	defer cancel()
+	c, err := r.docker.Inspect(ctx, id)
+	if err != nil {
+		return peer.Process{}, fmt.Errorf("router: container %s: %w", id, err)
+	}
+	if !c.Running {
+		return peer.Process{}, fmt.Errorf("router: container %s is not running", id)
+	}
+	dir := c.Labels[docker.WorkingDirLabel]
+	if dir == "" {
+		return peer.Process{}, fmt.Errorf("router: container %s was not started by Compose", id)
+	}
+
+	return peer.Process{Command: "container " + c.Name, Cwd: dir}, nil
 }
 
 // upstreamOf returns the upstream of wt: the one its configuration names,

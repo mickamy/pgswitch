@@ -835,14 +835,24 @@ func TestSwitchedRenamesOnTheDatabasesUpstream(t *testing.T) {
 
 // fakeFinder answers for Docker, recording the roots it is asked about.
 type fakeFinder struct {
-	mu       sync.Mutex
-	postgres docker.Postgres
-	ok       bool
-	err      error
-	asked    [][]string
+	mu         sync.Mutex
+	postgres   docker.Postgres
+	ok         bool
+	err        error
+	asked      [][]string
+	containers map[string]docker.Container
 }
 
-var _ router.PostgresFinder = (*fakeFinder)(nil)
+var _ router.Docker = (*fakeFinder)(nil)
+
+func (f *fakeFinder) Inspect(_ context.Context, id string) (docker.Container, error) {
+	c, ok := f.containers[id]
+	if !ok {
+		return docker.Container{}, docker.ErrNotFound
+	}
+
+	return c, nil
+}
 
 func (f *fakeFinder) FindPostgres(_ context.Context, roots []string) (docker.Postgres, bool, error) {
 	f.mu.Lock()
@@ -957,4 +967,75 @@ func TestRouteReusesWhatDockerSaidForAWhile(t *testing.T) {
 	now = now.Add(2 * time.Second)
 	route()
 	assert.Equal(t, 2, finder.times(), "asked again once that is old")
+}
+
+func TestRouteADeclaredContainer(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t)
+	linked := repo + "-fix-tax"
+	runGit(t, repo, "worktree", "add", "-q", "-b", "fix-tax", linked)
+	t.Cleanup(func() { _ = os.RemoveAll(linked) })
+	web := docker.Container{
+		ID: "4d51f0679caa", Name: "shop-fix-tax-web-1", Running: true,
+		Labels: map[string]string{docker.WorkingDirLabel: linked},
+	}
+	noLookup := func(context.Context, netip.AddrPort, netip.AddrPort) (peer.Process, error) {
+		t.Error("the process is looked up for a declared container")
+
+		return peer.Process{}, errors.New("unexpected")
+	}
+	unattributed := proxy.Route{Database: database, Upstream: router.DefaultUpstream.Addr}
+
+	tests := map[string]struct {
+		docker router.Docker
+		want   proxy.Route
+	}{
+		"running, started by Compose in a worktree": {
+			docker: &fakeFinder{containers: map[string]docker.Container{"4d51f0679caa": web}},
+			want: proxy.Route{
+				Database: physical(repo, database, "fix-tax"), Upstream: router.DefaultUpstream.Addr,
+				Owner: linked, Branch: "fix-tax", Repo: filepath.Base(repo), Command: "container shop-fix-tax-web-1",
+			},
+		},
+		"not running": {
+			docker: &fakeFinder{containers: map[string]docker.Container{"4d51f0679caa": func() docker.Container {
+				c := web
+				c.Running = false
+
+				return c
+			}()}},
+			want: unattributed,
+		},
+		"not started by Compose": {
+			docker: &fakeFinder{containers: map[string]docker.Container{"4d51f0679caa": func() docker.Container {
+				c := web
+				c.Labels = nil
+
+				return c
+			}()}},
+			want: unattributed,
+		},
+		"unknown to Docker": {
+			docker: &fakeFinder{},
+			want:   unattributed,
+		},
+		"no Docker": {
+			want: unattributed,
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			r := router.NewWithPostgres(slog.New(slog.DiscardHandler), (&clonersByUpstream{}).get, tt.docker,
+				&fakeWatcher{}, noLookup)
+
+			got, err := r.Route(proxy.WithContainer(t.Context(), "4d51f0679caa"), client, server, database)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
