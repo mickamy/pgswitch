@@ -12,16 +12,17 @@ const maxIdentifierLen = 63
 
 const separator = "__"
 
-// PhysicalName returns the database that db maps to on branch.
-// The default branch keeps the original name. Other branches always carry a
-// hash of the exact branch name, because slugs collide (feature/foo and
-// feature-foo).
-func PhysicalName(db, branch, defaultBranch string) string {
+// PhysicalName returns the database that db maps to on branch of the
+// repository repoID names (see git.RepoID). The default branch keeps the
+// original name. Other branches always carry a hash of the repository and the exact branch name:
+// slugs collide (feature/foo and feature-foo), and so do branches of two
+// repositories asking for the same database.
+func PhysicalName(repoID, db, branch, defaultBranch string) string {
 	if branch == defaultBranch {
 		return db
 	}
 
-	suffix := "_" + ident.ShortHash(db, branch)
+	suffix := "_" + ident.ShortHash(repoID, db, branch)
 	name := db + separator + slug(branch)
 	prefix := strings.TrimRight(utf8.Truncate(name, maxIdentifierLen-len(suffix)), "_")
 

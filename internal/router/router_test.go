@@ -93,6 +93,23 @@ func newRouter(cloner router.Cloner, lookup lookupFunc) router.Router {
 	return router.NewWithLookup(slog.New(slog.DiscardHandler), cloner, &fakeWatcher{}, lookup)
 }
 
+// physical is the database db maps to on branch of repo, whose default branch
+// is main.
+func physical(repo, db, branch string) string {
+	return route.PhysicalName(filepath.Join(repo, ".git"), db, branch, "main")
+}
+
+// ensured is how fakeCloner records cloning branch's database from those of
+// sources.
+func ensured(repo string, sources []string, branch string) string {
+	dbs := make([]string, len(sources))
+	for i, s := range sources {
+		dbs[i] = physical(repo, database, s)
+	}
+
+	return strings.Join(dbs, ",") + "->" + physical(repo, database, branch)
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 
@@ -142,11 +159,12 @@ func TestRoute(t *testing.T) {
 	// connection should be routed for.
 	tests := map[string]struct {
 		setup func(t *testing.T, repo string) (cwd, owner string)
-		want  string
+		// wantBranch is the branch whose database the connection lands on.
+		wantBranch string
 	}{
 		"default branch keeps the name": {
-			setup: func(_ *testing.T, repo string) (string, string) { return repo, repo },
-			want:  database,
+			setup:      func(_ *testing.T, repo string) (string, string) { return repo, repo },
+			wantBranch: "main",
 		},
 		"feature branch": {
 			setup: func(t *testing.T, repo string) (string, string) {
@@ -154,7 +172,7 @@ func TestRoute(t *testing.T) {
 
 				return repo, repo
 			},
-			want: route.PhysicalName(database, "feature/coupons", "main"),
+			wantBranch: "feature/coupons",
 		},
 		"subdirectory of a linked worktree": {
 			setup: func(t *testing.T, repo string) (string, string) {
@@ -166,7 +184,7 @@ func TestRoute(t *testing.T) {
 
 				return sub, linked
 			},
-			want: route.PhysicalName(database, "fix-tax", "main"),
+			wantBranch: "fix-tax",
 		},
 		"detached HEAD goes to the default branch": {
 			setup: func(t *testing.T, repo string) (string, string) {
@@ -174,11 +192,11 @@ func TestRoute(t *testing.T) {
 
 				return repo, repo
 			},
-			want: database,
+			wantBranch: "main",
 		},
 		"outside any repository passes through": {
-			setup: func(t *testing.T, _ string) (string, string) { return t.TempDir(), "" },
-			want:  database,
+			setup:      func(t *testing.T, _ string) (string, string) { return t.TempDir(), "" },
+			wantBranch: "main",
 		},
 	}
 
@@ -186,13 +204,14 @@ func TestRoute(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			cwd, owner := tt.setup(t, newRepo(t))
+			repo := newRepo(t)
+			cwd, owner := tt.setup(t, repo)
 			r := newRouter(&fakeCloner{}, lookupAt(cwd))
 
 			got, err := r.Route(t.Context(), client, server, database)
 			require.NoError(t, err)
 
-			assert.Equal(t, tt.want, got.Database)
+			assert.Equal(t, physical(repo, database, tt.wantBranch), got.Database)
 			assert.Equal(t, owner, got.Owner)
 		})
 	}
@@ -254,7 +273,7 @@ func TestRouteClones(t *testing.T) {
 	repo := newRepo(t)
 	runGit(t, repo, "switch", "-q", "-c", "feature/coupons")
 	onFeature := lookupAt(repo)
-	branchDB := route.PhysicalName(database, "feature/coupons", "main")
+	branchDB := physical(repo, database, "feature/coupons")
 
 	tests := map[string]struct {
 		lookup       lookupFunc
@@ -370,13 +389,12 @@ func TestRouteWatchesTheRepository(t *testing.T) {
 func TestRouteClonesFromTheParentBranch(t *testing.T) {
 	t.Parallel()
 
-	db := func(branch string) string { return route.PhysicalName(database, branch, "main") }
-
 	// Each setup starts on feature/a, one commit ahead of main, with
 	// feature/b one commit ahead of that. It returns the checkout to connect
 	// from, now on the branch under test.
 	tests := map[string]struct {
-		setup       func(t *testing.T, repo string, r router.Router) (cwd, branch string)
+		setup func(t *testing.T, repo string, r router.Router) (cwd, branch string)
+		// wantSources are the branches whose databases to clone from, best first.
 		wantSources []string
 	}{
 		"the start point the reflog names": {
@@ -385,7 +403,7 @@ func TestRouteClonesFromTheParentBranch(t *testing.T) {
 
 				return repo, "named"
 			},
-			wantSources: []string{db("feature/b"), database},
+			wantSources: []string{"feature/b", "main"},
 		},
 		"the branch an observed switch came from": {
 			setup: func(t *testing.T, repo string, r router.Router) (string, string) {
@@ -394,7 +412,7 @@ func TestRouteClonesFromTheParentBranch(t *testing.T) {
 
 				return repo, "observed"
 			},
-			wantSources: []string{db("feature/a"), database},
+			wantSources: []string{"feature/a", "main"},
 		},
 		"a branch whose tip it started at": {
 			setup: func(t *testing.T, repo string, _ router.Router) (string, string) {
@@ -404,7 +422,7 @@ func TestRouteClonesFromTheParentBranch(t *testing.T) {
 
 				return linked, "wt"
 			},
-			wantSources: []string{db("feature/a"), database},
+			wantSources: []string{"feature/a", "main"},
 		},
 		"the reflog before the observed switch": {
 			setup: func(t *testing.T, repo string, r router.Router) (string, string) {
@@ -413,7 +431,7 @@ func TestRouteClonesFromTheParentBranch(t *testing.T) {
 
 				return repo, "explicit"
 			},
-			wantSources: []string{db("feature/b"), db("feature/a"), database},
+			wantSources: []string{"feature/b", "feature/a", "main"},
 		},
 		"the default branch is the last resort": {
 			setup: func(t *testing.T, repo string, _ router.Router) (string, string) {
@@ -421,7 +439,7 @@ func TestRouteClonesFromTheParentBranch(t *testing.T) {
 
 				return repo, "from-main"
 			},
-			wantSources: []string{database},
+			wantSources: []string{"main"},
 		},
 	}
 
@@ -448,8 +466,8 @@ func TestRouteClonesFromTheParentBranch(t *testing.T) {
 			got, err := r.Route(t.Context(), client, server, database)
 			require.NoError(t, err)
 
-			assert.Equal(t, db(branch), got.Database)
-			assert.Equal(t, []string{strings.Join(tt.wantSources, ",") + "->" + db(branch)}, cloner.ensured)
+			assert.Equal(t, physical(repo, database, branch), got.Database)
+			assert.Equal(t, []string{ensured(repo, tt.wantSources, branch)}, cloner.ensured)
 		})
 	}
 }
@@ -457,13 +475,13 @@ func TestRouteClonesFromTheParentBranch(t *testing.T) {
 func TestRouteParentProvenance(t *testing.T) {
 	t.Parallel()
 
-	db := func(branch string) string { return route.PhysicalName(database, branch, "main") }
 	longAgo := []string{"GIT_COMMITTER_DATE=2001-01-01T00:00:00Z"}
 
 	// Each setup starts on feature/a, one commit ahead of main, with sibling
 	// pointing at main and feature/b one commit ahead of feature/a.
 	tests := map[string]struct {
-		setup       func(t *testing.T, repo string, r router.Router) (branch string)
+		setup func(t *testing.T, repo string, r router.Router) (branch string)
+		// wantSources are the branches whose databases to clone from, best first.
 		wantSources []string
 	}{
 		"an explicit main beats a sibling at the same commit": {
@@ -472,7 +490,7 @@ func TestRouteParentProvenance(t *testing.T) {
 
 				return "child"
 			},
-			wantSources: []string{database, db("sibling")},
+			wantSources: []string{"main", "sibling"},
 		},
 		"an explicit main beats the branch switched from": {
 			setup: func(t *testing.T, repo string, r router.Router) string {
@@ -481,7 +499,7 @@ func TestRouteParentProvenance(t *testing.T) {
 
 				return "child"
 			},
-			wantSources: []string{database, db("feature/a"), db("sibling")},
+			wantSources: []string{"main", "feature/a", "sibling"},
 		},
 		"a later checkout does not replace the creation switch": {
 			setup: func(t *testing.T, repo string, r router.Router) string {
@@ -495,7 +513,7 @@ func TestRouteParentProvenance(t *testing.T) {
 
 				return "child"
 			},
-			wantSources: []string{db("feature/a"), database},
+			wantSources: []string{"feature/a", "main"},
 		},
 		"a checkout of a branch created long ago is not its creation": {
 			setup: func(t *testing.T, repo string, r router.Router) string {
@@ -506,7 +524,7 @@ func TestRouteParentProvenance(t *testing.T) {
 
 				return "old"
 			},
-			wantSources: []string{db("feature/a"), database},
+			wantSources: []string{"feature/a", "main"},
 		},
 	}
 
@@ -529,7 +547,7 @@ func TestRouteParentProvenance(t *testing.T) {
 			_, err := r.Route(t.Context(), client, server, database)
 			require.NoError(t, err)
 
-			assert.Equal(t, []string{strings.Join(tt.wantSources, ",") + "->" + db(branch)}, cloner.ensured)
+			assert.Equal(t, []string{ensured(repo, tt.wantSources, branch)}, cloner.ensured)
 		})
 	}
 }
@@ -537,13 +555,11 @@ func TestRouteParentProvenance(t *testing.T) {
 func TestSwitchedFollowsABranchRename(t *testing.T) {
 	t.Parallel()
 
-	db := func(name, branch string) string { return route.PhysicalName(name, branch, "main") }
-
 	tests := map[string]struct {
-		rename      func(t *testing.T, repo string) (from, to string)
+		rename func(t *testing.T, repo string) (from, to string)
+		// wantRenamed are the requested databases moved from the old branch's
+		// name to the new one's.
 		wantRenamed []string
-		// wantLabeled are the requested databases relabeled for the new branch.
-		wantLabeled []string
 	}{
 		"git branch -m": {
 			rename: func(t *testing.T, repo string) (string, string) {
@@ -551,11 +567,7 @@ func TestSwitchedFollowsABranchRename(t *testing.T) {
 
 				return "feature/old", "feature/new"
 			},
-			wantRenamed: []string{
-				db("shop_development", "feature/old") + "->" + db("shop_development", "feature/new"),
-				db("shop_test", "feature/old") + "->" + db("shop_test", "feature/new"),
-			},
-			wantLabeled: []string{"shop_development", "shop_test"},
+			wantRenamed: []string{"shop_development", "shop_test"},
 		},
 		"a commit right after the rename": {
 			rename: func(t *testing.T, repo string) (string, string) {
@@ -564,11 +576,7 @@ func TestSwitchedFollowsABranchRename(t *testing.T) {
 
 				return "feature/old", "feature/new"
 			},
-			wantRenamed: []string{
-				db("shop_development", "feature/old") + "->" + db("shop_development", "feature/new"),
-				db("shop_test", "feature/old") + "->" + db("shop_test", "feature/new"),
-			},
-			wantLabeled: []string{"shop_development", "shop_test"},
+			wantRenamed: []string{"shop_development", "shop_test"},
 		},
 		"a rename long ago is not this switch": {
 			rename: func(t *testing.T, repo string) (string, string) {
@@ -613,11 +621,13 @@ func TestSwitchedFollowsABranchRename(t *testing.T) {
 			from, to := tt.rename(t, repo)
 			r.Switched(t.Context(), filepath.Join(repo, ".git"), from, to)
 
-			assert.Equal(t, tt.wantRenamed, cloner.renamed)
-			wantLabels := make([]clone.Label, 0, len(tt.wantLabeled))
-			for _, name := range tt.wantLabeled {
+			wantRenamed := make([]string, 0, len(tt.wantRenamed))
+			wantLabels := make([]clone.Label, 0, len(tt.wantRenamed))
+			for _, name := range tt.wantRenamed {
+				wantRenamed = append(wantRenamed, physical(repo, name, from)+"->"+physical(repo, name, to))
 				wantLabels = append(wantLabels, clone.Label{Repo: filepath.Join(repo, ".git"), Branch: to, Database: name})
 			}
+			assert.ElementsMatch(t, wantRenamed, cloner.renamed)
 			assert.ElementsMatch(t, wantLabels, cloner.renameLabels)
 		})
 	}
@@ -628,9 +638,8 @@ func TestSwitchedFollowsABranchRename(t *testing.T) {
 func TestRouteRenamesBeforeTheWatcherDoes(t *testing.T) {
 	t.Parallel()
 
-	db := func(branch string) string { return route.PhysicalName(database, branch, "main") }
-
 	repo := newRepo(t)
+	db := func(branch string) string { return physical(repo, database, branch) }
 	runGit(t, repo, "switch", "-q", "-c", "feature/old")
 	runGit(t, repo, "branch", "-m", "feature/new")
 	cloner := &fakeCloner{}
@@ -663,7 +672,7 @@ func TestRouteDescribesTheConnection(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, proxy.Route{
-		Database: route.PhysicalName(database, "fix-tax", "main"),
+		Database: physical(repo, database, "fix-tax"),
 		Owner:    linked,
 		Repo:     filepath.Base(repo),
 		Branch:   "fix-tax",

@@ -175,7 +175,7 @@ func TestProxyRoutesByBranch(t *testing.T) { //nolint:paralleltest // t.Chdir ch
 	runGit(t, repo, "switch", "-q", "-c", "feature/coupons")
 
 	db := uniqueName("pgswitch_e2e")
-	branchDB := route.PhysicalName(db, "feature/coupons", "main")
+	branchDB := route.PhysicalName(filepath.Join(repo, ".git"), db, "feature/coupons", "main")
 	createDatabase(t, admin, db)
 	createDatabase(t, admin, branchDB)
 
@@ -207,7 +207,7 @@ func TestProxyClonesOnFirstConnection(t *testing.T) { //nolint:paralleltest // t
 	runGit(t, repo, "switch", "-q", "-c", "fix-tax")
 
 	db := uniqueName("pgswitch_e2e")
-	branchDB := route.PhysicalName(db, "fix-tax", "main")
+	branchDB := route.PhysicalName(filepath.Join(repo, ".git"), db, "fix-tax", "main")
 	createDatabase(t, admin, db)
 	dropOnCleanup(t, admin, branchDB)
 
@@ -247,7 +247,7 @@ func TestProxySeversOnSwitch(t *testing.T) { //nolint:paralleltest // t.Chdir ch
 	runGit(t, repo, "commit", "-q", "--allow-empty", "-m", "init")
 
 	db := uniqueName("pgswitch_e2e")
-	branchDB := route.PhysicalName(db, "feature/coupons", "main")
+	branchDB := route.PhysicalName(filepath.Join(repo, ".git"), db, "feature/coupons", "main")
 	createDatabase(t, admin, db)
 	dropOnCleanup(t, admin, branchDB)
 
@@ -282,8 +282,8 @@ func TestProxyClonesFromTheParentBranch(t *testing.T) { //nolint:paralleltest //
 	runGit(t, repo, "switch", "-q", "-c", "feature/coupons")
 
 	db := uniqueName("pgswitch_e2e")
-	parentDB := route.PhysicalName(db, "feature/coupons", "main")
-	childDB := route.PhysicalName(db, "feature/coupons-ui", "main")
+	parentDB := route.PhysicalName(filepath.Join(repo, ".git"), db, "feature/coupons", "main")
+	childDB := route.PhysicalName(filepath.Join(repo, ".git"), db, "feature/coupons-ui", "main")
 	createDatabase(t, admin, db)
 	dropOnCleanup(t, admin, parentDB)
 	dropOnCleanup(t, admin, childDB)
@@ -321,8 +321,8 @@ func TestProxyFollowsBranchRename(t *testing.T) { //nolint:paralleltest // t.Chd
 	runGit(t, repo, "switch", "-q", "-c", "feature/old")
 
 	db := uniqueName("pgswitch_e2e")
-	oldDB := route.PhysicalName(db, "feature/old", "main")
-	newDB := route.PhysicalName(db, "feature/new", "main")
+	oldDB := route.PhysicalName(filepath.Join(repo, ".git"), db, "feature/old", "main")
+	newDB := route.PhysicalName(filepath.Join(repo, ".git"), db, "feature/new", "main")
 	createDatabase(t, admin, db)
 	dropOnCleanup(t, admin, oldDB)
 	dropOnCleanup(t, admin, newDB)
@@ -361,8 +361,8 @@ func TestProxyRenamesOnAnImmediateReconnect(t *testing.T) { //nolint:paralleltes
 	runGit(t, repo, "switch", "-q", "-c", "feature/old")
 
 	db := uniqueName("pgswitch_e2e")
-	oldDB := route.PhysicalName(db, "feature/old", "main")
-	newDB := route.PhysicalName(db, "feature/new", "main")
+	oldDB := route.PhysicalName(filepath.Join(repo, ".git"), db, "feature/old", "main")
+	newDB := route.PhysicalName(filepath.Join(repo, ".git"), db, "feature/new", "main")
 	createDatabase(t, admin, db)
 	dropOnCleanup(t, admin, oldDB)
 	dropOnCleanup(t, admin, newDB)
