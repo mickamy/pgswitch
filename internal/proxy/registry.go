@@ -62,6 +62,21 @@ func (r *registry) closeAll(owner, branch string) int {
 }
 
 // list returns the connections, oldest first.
+// upstreams lists the upstreams of the connections, each once.
+func (r *registry) upstreams() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var upstreams []string
+	for _, info := range r.conns {
+		if !slices.Contains(upstreams, info.Upstream) {
+			upstreams = append(upstreams, info.Upstream)
+		}
+	}
+
+	return upstreams
+}
+
 func (r *registry) list() []Conn {
 	r.mu.Lock()
 	conns := make([]Conn, 0, len(r.conns))

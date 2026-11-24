@@ -184,6 +184,58 @@ func TestProxyForwardsCancel(t *testing.T) {
 	assert.ErrorIs(t, err, io.EOF)
 }
 
+func TestProxyDialsTheRoutesUpstream(t *testing.T) {
+	t.Parallel()
+
+	byDefault, receivedByDefault := startUpstream(t)
+	other, receivedByOther := startUpstream(t)
+	router := proxy.RouterFunc(func(_ context.Context, _, _ net.Addr, database string) (proxy.Route, error) {
+		return proxy.Route{Database: database, Upstream: other}, nil
+	})
+	addr, _ := startProxy(t, byDefault, router)
+
+	conn := dial(t, addr)
+	_, err := conn.Write(startupPacket(pgwire.Param{Name: "database", Value: "shop_development"}))
+	require.NoError(t, err)
+
+	startup, err := pgwire.ParseStartup(receive(t, receivedByOther))
+	require.NoError(t, err)
+	assert.Equal(t, "shop_development", startup.Database())
+	assert.Empty(t, receivedByDefault)
+}
+
+func TestProxyForwardsCancelToEveryUpstreamInUse(t *testing.T) {
+	t.Parallel()
+
+	byDefault, receivedByDefault := startUpstream(t)
+	other, receivedByOther := startUpstream(t)
+	_, receivedByUnused := startUpstream(t)
+	upstreams := map[string]string{"on_default": "", "on_other": other}
+	router := proxy.RouterFunc(func(_ context.Context, _, _ net.Addr, database string) (proxy.Route, error) {
+		return proxy.Route{Database: database, Upstream: upstreams[database]}, nil
+	})
+	addr, _ := startProxy(t, byDefault, router)
+	for database, received := range map[string]<-chan pgwire.Packet{
+		"on_default": receivedByDefault,
+		"on_other":   receivedByOther,
+	} {
+		_, err := dial(t, addr).Write(startupPacket(pgwire.Param{Name: "database", Value: database}))
+		require.NoError(t, err)
+		receive(t, received)
+	}
+
+	cancel := pgwire.Packet{Code: codeCancelRequest, Body: []byte{0, 0, 0, 42, 1, 2, 3, 4}}
+	conn := dial(t, addr)
+	_, err := conn.Write(cancel.Bytes())
+	require.NoError(t, err)
+
+	assert.Equal(t, cancel, receive(t, receivedByDefault))
+	assert.Equal(t, cancel, receive(t, receivedByOther))
+	_, err = conn.Read(make([]byte, 1))
+	require.ErrorIs(t, err, io.EOF, "closed once every upstream is done")
+	assert.Empty(t, receivedByUnused, "an upstream no connection uses is left alone")
+}
+
 // startHoldingUpstream runs a fake server that keeps the first connection open
 // after reading its packet, until release is closed.
 func startHoldingUpstream(t *testing.T, release <-chan struct{}) (string, <-chan pgwire.Packet) {
@@ -441,9 +493,9 @@ func TestConnsListsRelayedConnections(t *testing.T) {
 	require.Len(t, conns, 1)
 	got := conns[0]
 	assert.Equal(t, proxy.Route{
-		Database: "shop_development__fix_tax", Owner: "/src/shop-fix-tax",
+		Database: "shop_development__fix_tax", Upstream: upstream, Owner: "/src/shop-fix-tax",
 		Repo: "shop", Branch: "fix-tax", PID: 48211, Command: "ruby",
-	}, got.Route)
+	}, got.Route, "a route without an upstream goes to the proxy's")
 	assert.Equal(t, "shop_development", got.Requested)
 	assert.Equal(t, conn.LocalAddr().String(), got.Client)
 	assert.WithinDuration(t, time.Now(), got.Since, 5*time.Second)
