@@ -2,7 +2,6 @@ package service_test
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,12 +15,23 @@ import (
 )
 
 // fakeRunner records the commands it is given and fails those in fail, as
-// many times as given.
+// many times as given, exiting with exit[cmd] (1 when unset).
 type fakeRunner struct {
 	mu   sync.Mutex
 	ran  []string
 	fail map[string]int
+	exit map[string]int
 }
+
+// exitError is a command that ran and failed.
+type exitError struct {
+	cmd  string
+	code int
+}
+
+func (e exitError) Error() string { return e.cmd + ": failed" }
+
+func (e exitError) ExitCode() int { return e.code }
 
 func (r *fakeRunner) run(_ context.Context, name string, args ...string) error {
 	r.mu.Lock()
@@ -31,8 +41,12 @@ func (r *fakeRunner) run(_ context.Context, name string, args ...string) error {
 	r.ran = append(r.ran, cmd)
 	if r.fail[cmd] > 0 {
 		r.fail[cmd]--
+		code := 1
+		if c, ok := r.exit[cmd]; ok {
+			code = c
+		}
 
-		return errors.New(cmd + ": failed")
+		return exitError{cmd: cmd, code: code}
 	}
 
 	return nil
@@ -72,8 +86,75 @@ func TestLaunchd(t *testing.T) {
 	r.ran = nil
 	require.NoError(t, m.Uninstall(t.Context()))
 	assert.NoFileExists(t, plist)
-	assert.Equal(t, []string{"launchctl bootout gui/501/io.github.mickamy.pgswitch"}, r.ran)
+	assert.Equal(t, []string{
+		"launchctl print gui/501/io.github.mickamy.pgswitch",
+		"launchctl bootout gui/501/io.github.mickamy.pgswitch",
+	}, r.ran)
+
+	r.ran = nil
+	r.fail["launchctl print gui/501/io.github.mickamy.pgswitch"] = 1
+	r.exit = map[string]int{"launchctl print gui/501/io.github.mickamy.pgswitch": 113}
 	require.NoError(t, m.Uninstall(t.Context()), "uninstalling again is not an error")
+	assert.Equal(t, []string{"launchctl print gui/501/io.github.mickamy.pgswitch"}, r.ran, "nothing loaded to stop")
+}
+
+func TestLaunchdUninstallWhenLaunchctlFails(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		fail    map[string]int
+		exit    map[string]int
+		wantErr string
+	}{
+		"print fails for another reason": {
+			fail:    map[string]int{"launchctl print gui/501/io.github.mickamy.pgswitch": 1},
+			exit:    map[string]int{"launchctl print gui/501/io.github.mickamy.pgswitch": 5},
+			wantErr: "launchctl print gui/501/io.github.mickamy.pgswitch: failed",
+		},
+		"the job went away before bootout": {
+			fail: map[string]int{"launchctl bootout gui/501/io.github.mickamy.pgswitch": 1},
+			exit: map[string]int{"launchctl bootout gui/501/io.github.mickamy.pgswitch": 113},
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			e := env(t, "darwin", nil)
+			installer, err := service.New(e, (&fakeRunner{}).run)
+			require.NoError(t, err)
+			require.NoError(t, installer.Install(t.Context(), spec))
+			m, err := service.New(e, (&fakeRunner{fail: tt.fail, exit: tt.exit}).run)
+			require.NoError(t, err)
+
+			err = m.Uninstall(t.Context())
+
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				assert.FileExists(t, m.UnitPath())
+
+				return
+			}
+			require.NoError(t, err)
+			assert.NoFileExists(t, m.UnitPath())
+		})
+	}
+}
+
+func TestLaunchdUninstallKeepsAJobThatDoesNotStop(t *testing.T) {
+	t.Parallel()
+
+	e := env(t, "darwin", nil)
+	r := &fakeRunner{fail: map[string]int{"launchctl bootout gui/501/io.github.mickamy.pgswitch": 2}}
+	m, err := service.New(e, r.run)
+	require.NoError(t, err)
+	require.NoError(t, m.Install(t.Context(), spec))
+
+	err = m.Uninstall(t.Context())
+
+	require.ErrorContains(t, err, "launchctl bootout gui/501/io.github.mickamy.pgswitch: failed")
+	assert.FileExists(t, m.UnitPath(), "the unit stays with the job it describes")
 }
 
 func TestLaunchdGivesUpBootstrapping(t *testing.T) {
@@ -127,7 +208,7 @@ func TestSystemdInstallAndUninstall(t *testing.T) {
 	t.Parallel()
 
 	e := env(t, "linux", nil)
-	r := &fakeRunner{fail: map[string]int{"systemctl --user disable --now pgswitch.service": 1}}
+	r := &fakeRunner{}
 	m, err := service.New(e, r.run)
 	require.NoError(t, err)
 
@@ -143,12 +224,30 @@ func TestSystemdInstallAndUninstall(t *testing.T) {
 	}, r.ran)
 
 	r.ran = nil
-	require.NoError(t, m.Uninstall(t.Context()), "a failed disable, as when it is not loaded, does not stop it")
+	require.NoError(t, m.Uninstall(t.Context()))
 	assert.NoFileExists(t, m.UnitPath())
 	assert.Equal(t, []string{
 		"systemctl --user disable --now pgswitch.service",
 		"systemctl --user daemon-reload",
 	}, r.ran)
+
+	r.ran = nil
+	require.NoError(t, m.Uninstall(t.Context()), "uninstalling again is not an error")
+	assert.Empty(t, r.ran, "nothing installed to stop")
+}
+
+func TestSystemdUninstallKeepsAUnitThatDoesNotStop(t *testing.T) {
+	t.Parallel()
+
+	r := &fakeRunner{fail: map[string]int{"systemctl --user disable --now pgswitch.service": 1}}
+	m, err := service.New(env(t, "linux", nil), r.run)
+	require.NoError(t, err)
+	require.NoError(t, m.Install(t.Context(), spec))
+
+	err = m.Uninstall(t.Context())
+
+	require.ErrorContains(t, err, "systemctl --user disable --now pgswitch.service: failed")
+	assert.FileExists(t, m.UnitPath())
 }
 
 func TestSystemdInstallStopsAtAFailure(t *testing.T) {

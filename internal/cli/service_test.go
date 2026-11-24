@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"runtime"
 	"testing"
@@ -21,10 +22,11 @@ const binary = "/opt/homebrew/bin/pgswitch"
 // fakeManager records what it is asked to install. When starts is set, an
 // install starts answering on the control socket, as serve would.
 type fakeManager struct {
-	t           *testing.T
-	starts      bool
-	installed   []service.Spec
-	uninstalled int
+	t            *testing.T
+	starts       bool
+	installed    []service.Spec
+	uninstalled  int
+	uninstallErr error
 }
 
 var _ service.Manager = (*fakeManager)(nil)
@@ -41,7 +43,7 @@ func (m *fakeManager) Install(_ context.Context, spec service.Spec) error {
 func (m *fakeManager) Uninstall(context.Context) error {
 	m.uninstalled++
 
-	return nil
+	return m.uninstallErr
 }
 
 func (m *fakeManager) UnitPath() string {
@@ -115,6 +117,18 @@ func TestServiceUninstall(t *testing.T) { //nolint:paralleltest // t.Chdir chang
 	assert.Equal(t, ""+
 		"✔ pgswitch is stopped and /Users/me/Library/LaunchAgents/io.github.mickamy.pgswitch.plist is removed\n"+
 		"  the admin password stays in admin-password; delete it if serve no longer needs it\n", out)
+}
+
+func TestServiceUninstallThatDoesNotStop(t *testing.T) { //nolint:paralleltest // t.Chdir changes the cwd
+	t.Chdir(t.TempDir())
+	m := &fakeManager{t: t, uninstallErr: errors.New("launchctl bootout: failed")}
+	cli.StubServices(t, m, binary, ".", time.Second)
+
+	code, out, stderr := runCLI(t, "service", "uninstall")
+
+	assert.Equal(t, exit.Error, code)
+	assert.Empty(t, out, "no word of it being stopped")
+	assert.Contains(t, stderr, "launchctl bootout: failed")
 }
 
 func TestServiceUsage(t *testing.T) {

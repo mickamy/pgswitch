@@ -18,10 +18,13 @@ var ErrUnsupported = errors.New("service: only macOS (launchd) and Linux (system
 const (
 	bootstrapAttempts = 5
 	bootstrapRetry    = 200 * time.Millisecond
+	// launchctlNoSuchJob is how launchctl exits for a job that is not loaded.
+	launchctlNoSuchJob = 113
 )
 
 // Runner runs a command such as launchctl or systemctl. Its error carries
-// what the command printed.
+// what the command printed, and wraps one with an ExitCode method when the
+// command ran and failed.
 type Runner func(ctx context.Context, name string, args ...string) error
 
 // Exec runs commands for real.
@@ -39,7 +42,8 @@ type Manager interface {
 	// Install writes the unit for spec and (re)starts it.
 	Install(ctx context.Context, spec Spec) error
 	// Uninstall stops the service and removes its unit. A service that is
-	// not installed is not an error.
+	// not installed is not an error; one that does not stop is, and keeps
+	// its unit.
 	Uninstall(ctx context.Context) error
 	// UnitPath is where the unit is written.
 	UnitPath() string
@@ -107,9 +111,23 @@ func (l launchd) Install(ctx context.Context, spec Spec) error {
 }
 
 func (l launchd) Uninstall(ctx context.Context) error {
-	_ = l.run(ctx, "launchctl", "bootout", l.domain+"/"+Label)
+	job := l.domain + "/" + Label
+	err := l.run(ctx, "launchctl", "print", job)
+	if err == nil {
+		err = l.run(ctx, "launchctl", "bootout", job)
+	}
+	// A job that is not loaded, or no longer, has nothing left to stop.
+	if err != nil && !exitedWith(err, launchctlNoSuchJob) {
+		return fmt.Errorf("service: %w", err)
+	}
 
 	return removeUnit(l.path)
+}
+
+func exitedWith(err error, code int) bool {
+	var exit interface{ ExitCode() int }
+
+	return errors.As(err, &exit) && exit.ExitCode() == code
 }
 
 type systemd struct {
@@ -140,8 +158,12 @@ func (s systemd) Install(ctx context.Context, spec Spec) error {
 }
 
 func (s systemd) Uninstall(ctx context.Context) error {
-	// Fails when the unit is not there, which is fine.
-	_ = s.run(ctx, "systemctl", "--user", "disable", "--now", UnitName)
+	if _, err := os.Stat(s.path); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err := s.run(ctx, "systemctl", "--user", "disable", "--now", UnitName); err != nil {
+		return fmt.Errorf("service: %w", err)
+	}
 	if err := removeUnit(s.path); err != nil {
 		return err
 	}
