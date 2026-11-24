@@ -48,6 +48,14 @@ func TestSocket(t *testing.T) {
 			},
 			want: func(string) string { return "/run/user/1000/docker.sock" },
 		},
+		"DOCKER_HOST over DOCKER_CONTEXT, as the docker CLI does": {
+			setup: func(t *testing.T, home string) map[string]string {
+				writeContext(t, filepath.Join(home, ".docker"), "colima", "unix://"+home+"/.colima/default/docker.sock")
+
+				return map[string]string{"DOCKER_HOST": "unix:///run/user/1000/docker.sock", "DOCKER_CONTEXT": "colima"}
+			},
+			want: func(string) string { return "/run/user/1000/docker.sock" },
+		},
 		"a tcp DOCKER_HOST": {
 			setup: func(*testing.T, string) map[string]string {
 				return map[string]string{"DOCKER_HOST": "tcp://127.0.0.1:2375"}
