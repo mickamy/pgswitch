@@ -20,6 +20,7 @@ import (
 	"github.com/mickamy/pgswitch/internal/prune"
 	"github.com/mickamy/pgswitch/internal/router"
 	"github.com/mickamy/pgswitch/internal/statedir"
+	"github.com/mickamy/pgswitch/internal/upstream"
 	"github.com/mickamy/pgswitch/internal/watch"
 )
 
@@ -31,7 +32,7 @@ const (
 func runServe(ctx context.Context, args []string, std IO) int {
 	fs := newFlagSet("serve", std.Err, printServeUsage)
 	listen := fs.String("listen", defaultListen, "address to accept clients on")
-	upstream := fs.String("upstream", defaultUpstream, "address of the Postgres server")
+	upstreamAddr := fs.String("upstream", defaultUpstream, "address of the Postgres server")
 	adminUser := fs.String("admin-user", currentUser(), "role that creates branch databases; password from PGPASSWORD")
 	debug := fs.Bool("debug", false, "log how each connection is attributed")
 	controlPath := fs.String("control", defaultControl(), "control socket for status, log and prune; empty to disable")
@@ -61,7 +62,12 @@ func runServe(ctx context.Context, args []string, std IO) int {
 		return fail(std, err)
 	}
 
-	admin := pgclone.New(pgadmin.Config{Addr: *upstream, User: *adminUser, Password: os.Getenv("PGPASSWORD")})
+	byDefault := upstream.Upstream{Addr: *upstreamAddr, AdminUser: *adminUser, AdminPassword: os.Getenv("PGPASSWORD")}
+	servers := upstream.NewPool(func(u upstream.Upstream) server {
+		admin := pgclone.New(pgadmin.Config{Addr: u.Addr, User: u.AdminUser, Password: u.AdminPassword})
+
+		return server{admin: admin, cloner: clone.New(admin, logger.With("upstream", u.Addr))}
+	})
 
 	// The watcher reports to the router and severs through the proxy, both of
 	// which need the watcher; they are set before the watcher runs. A switch
@@ -75,16 +81,15 @@ func runServe(ctx context.Context, args []string, std IO) int {
 		r.Switched(ctx, c.CommonDir, c.From, c.To)
 		p.Sever(c.Worktree, c.To)
 	})
-	cloner := clone.New(admin, logger)
-	r = router.New(logger, cloner, w)
-	p = proxy.New(*upstream, r, logger)
+	r = router.New(logger, byDefault, func(u upstream.Upstream) router.Cloner { return servers.Get(u).cloner }, w)
+	p = proxy.New(*upstreamAddr, r, logger)
 	go w.Run(ctx)
 
 	if *controlPath != "" {
 		src := control.Source{
 			Status: func() control.Status { return statusOf(p.Conns()) },
 			Events: recent,
-			Pruner: pruneSource{p: prune.New(logger, admin, cloner)},
+			Pruner: pruneSource{p: prune.New(logger, servers.Get(byDefault).admin, servers.Get(byDefault).cloner)},
 		}
 		stopped, err := serveControl(ctx, *controlPath, src, logger)
 		if err != nil {
@@ -95,7 +100,7 @@ func runServe(ctx context.Context, args []string, std IO) int {
 		defer stopped()
 	}
 
-	logger.Info("serving", "listen", ln.Addr().String(), "upstream", *upstream, "admin_user", *adminUser)
+	logger.Info("serving", "listen", ln.Addr().String(), "upstream", *upstreamAddr, "admin_user", *adminUser)
 	if err := p.Serve(ctx, ln); err != nil {
 		return fail(std, err)
 	}
@@ -144,6 +149,13 @@ func serveControl(ctx context.Context, path string, src control.Source, logger *
 	}()
 
 	return func() { <-done }, nil
+}
+
+// server is what pgswitch keeps per upstream: one cloner, so clones and drops
+// there wait on one another.
+type server struct {
+	admin  pgclone.Admin
+	cloner *clone.Cloner
 }
 
 func currentUser() string {

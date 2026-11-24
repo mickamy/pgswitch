@@ -3,11 +3,13 @@ package router_test
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"net"
 	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -18,8 +20,10 @@ import (
 	"github.com/mickamy/pgswitch/internal/clone"
 	"github.com/mickamy/pgswitch/internal/peer"
 	"github.com/mickamy/pgswitch/internal/proxy"
+	"github.com/mickamy/pgswitch/internal/repoconf"
 	"github.com/mickamy/pgswitch/internal/route"
 	"github.com/mickamy/pgswitch/internal/router"
+	"github.com/mickamy/pgswitch/internal/upstream"
 )
 
 const database = "shop_development"
@@ -262,7 +266,7 @@ func TestRouteUnattributed(t *testing.T) {
 			got, err := r.Route(t.Context(), tt.client, server, database)
 			require.NoError(t, err)
 
-			assert.Equal(t, proxy.Route{Database: database}, got)
+			assert.Equal(t, proxy.Route{Database: database, Upstream: router.DefaultUpstream.Addr}, got)
 		})
 	}
 }
@@ -673,10 +677,151 @@ func TestRouteDescribesTheConnection(t *testing.T) {
 
 	assert.Equal(t, proxy.Route{
 		Database: physical(repo, database, "fix-tax"),
+		Upstream: router.DefaultUpstream.Addr,
 		Owner:    linked,
 		Repo:     filepath.Base(repo),
 		Branch:   "fix-tax",
 		PID:      48211,
 		Command:  "ruby",
 	}, got)
+}
+
+// clonersByUpstream gives each upstream a fakeCloner of its own and records
+// which upstreams were asked for.
+type clonersByUpstream struct {
+	mu      sync.Mutex
+	cloners map[upstream.Upstream]*fakeCloner
+}
+
+func (c *clonersByUpstream) get(u upstream.Upstream) router.Cloner {
+	return c.of(u)
+}
+
+func (c *clonersByUpstream) of(u upstream.Upstream) *fakeCloner {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.cloners == nil {
+		c.cloners = make(map[upstream.Upstream]*fakeCloner)
+	}
+	if c.cloners[u] == nil {
+		c.cloners[u] = &fakeCloner{}
+	}
+
+	return c.cloners[u]
+}
+
+func (c *clonersByUpstream) upstreams() []upstream.Upstream {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return slices.Collect(maps.Keys(c.cloners))
+}
+
+func writeConfig(t *testing.T, root, content string) {
+	t.Helper()
+
+	require.NoError(t, os.WriteFile(filepath.Join(root, repoconf.File), []byte(content), 0o600))
+}
+
+func TestRouteUsesTheRepositorysUpstream(t *testing.T) {
+	t.Parallel()
+
+	byDefault := router.DefaultUpstream
+	tests := map[string]struct {
+		config       string
+		database     string
+		want         upstream.Upstream
+		wantDatabase func(repo string) string
+	}{
+		"no configuration": {
+			database: database,
+			want:     byDefault,
+		},
+		"another server": {
+			config:   `upstream = "127.0.0.1:5433"`,
+			database: database,
+			want:     upstream.Upstream{Addr: "127.0.0.1:5433", AdminUser: byDefault.AdminUser},
+		},
+		"another server and role": {
+			config:   "upstream = \"127.0.0.1:5433\"\nadmin_user = \"postgres\"\nadmin_password = \"postgres\"",
+			database: database,
+			want:     upstream.Upstream{Addr: "127.0.0.1:5433", AdminUser: "postgres", AdminPassword: "postgres"},
+		},
+		"another role on the default server": {
+			config:   "admin_user = \"postgres\"\nadmin_password = \"postgres\"",
+			database: database,
+			want:     upstream.Upstream{Addr: byDefault.Addr, AdminUser: "postgres", AdminPassword: "postgres"},
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			repo := newRepo(t)
+			runGit(t, repo, "switch", "-q", "-c", "fix-tax")
+			if tt.config != "" {
+				writeConfig(t, repo, tt.config)
+			}
+			cloners := &clonersByUpstream{}
+			r := router.NewWithCloners(slog.New(slog.DiscardHandler), cloners.get, &fakeWatcher{}, lookupAt(repo))
+
+			got, err := r.Route(t.Context(), client, server, tt.database)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.want.Addr, got.Upstream)
+			assert.Equal(t, []upstream.Upstream{tt.want}, cloners.upstreams(), "cloned on that upstream")
+			assert.Equal(t, physical(repo, database, "fix-tax"), got.Database)
+		})
+	}
+}
+
+func TestRouteSendsSharedDatabasesToTheRepositorysUpstream(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t)
+	runGit(t, repo, "switch", "-q", "-c", "fix-tax")
+	writeConfig(t, repo, `upstream = "127.0.0.1:5433"`)
+	cloners := &clonersByUpstream{}
+	r := router.NewWithCloners(slog.New(slog.DiscardHandler), cloners.get, &fakeWatcher{}, lookupAt(repo))
+
+	got, err := r.Route(t.Context(), client, server, "postgres")
+	require.NoError(t, err)
+
+	assert.Equal(t, proxy.Route{Database: "postgres", Upstream: "127.0.0.1:5433", PID: 42}, got,
+		"db:create reaches the server the repository's databases are on, and is not severed on a switch")
+	assert.Empty(t, cloners.upstreams(), "nothing is cloned")
+}
+
+func TestRouteRejectsABrokenConfiguration(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t)
+	writeConfig(t, repo, `upstream = "db.example.com:5432"`)
+	r := router.NewWithLookup(slog.New(slog.DiscardHandler), &fakeCloner{}, &fakeWatcher{}, lookupAt(repo))
+
+	_, err := r.Route(t.Context(), client, server, database)
+
+	require.ErrorContains(t, err, repoconf.File+`:1: upstream: "db.example.com" is not a loopback address`)
+}
+
+func TestSwitchedRenamesOnTheDatabasesUpstream(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t)
+	runGit(t, repo, "switch", "-q", "-c", "feature/old")
+	writeConfig(t, repo, `upstream = "127.0.0.1:5433"`)
+	cloners := &clonersByUpstream{}
+	r := router.NewWithCloners(slog.New(slog.DiscardHandler), cloners.get, &fakeWatcher{}, lookupAt(repo))
+	_, err := r.Route(t.Context(), client, server, database)
+	require.NoError(t, err)
+
+	runGit(t, repo, "branch", "-m", "feature/new")
+	r.Switched(t.Context(), filepath.Join(repo, ".git"), "feature/old", "feature/new")
+
+	on5433 := cloners.of(upstream.Upstream{Addr: "127.0.0.1:5433", AdminUser: router.DefaultUpstream.AdminUser})
+	assert.Equal(t, []string{
+		physical(repo, database, "feature/old") + "->" + physical(repo, database, "feature/new"),
+	}, on5433.renamed)
 }
