@@ -8,6 +8,7 @@ func WithStagingNames(a Admin, next func() string) Admin {
 }
 
 var (
+	ParseLabel       = parseLabel
 	SettingStatement = settingStatement
 	SplitList        = splitList
 )

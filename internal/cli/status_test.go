@@ -132,4 +132,5 @@ func TestServeAnswersStatus(t *testing.T) { //nolint:paralleltest // t.Chdir cha
 
 	cancel()
 	assert.Equal(t, exit.OK, <-done)
+	assert.NoFileExists(t, socket, "serve returns once its control socket is gone")
 }

@@ -150,7 +150,7 @@ func startProxy(t *testing.T, admin pgadmin.Config) string {
 	)
 	w := watch.New(logger, func(c watch.Change) {
 		r.Switched(t.Context(), c.CommonDir, c.From, c.To)
-		p.Sever(c.Worktree)
+		p.Sever(c.Worktree, c.To)
 	})
 	r = router.New(logger, clone.New(pgclone.New(admin), logger), w)
 	p = proxy.New(admin.Addr, r, logger)

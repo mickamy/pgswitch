@@ -17,6 +17,7 @@ import (
 	"github.com/mickamy/pgswitch/internal/exit"
 	"github.com/mickamy/pgswitch/internal/pgadmin"
 	"github.com/mickamy/pgswitch/internal/proxy"
+	"github.com/mickamy/pgswitch/internal/prune"
 	"github.com/mickamy/pgswitch/internal/router"
 	"github.com/mickamy/pgswitch/internal/statedir"
 	"github.com/mickamy/pgswitch/internal/watch"
@@ -33,7 +34,7 @@ func runServe(ctx context.Context, args []string, std IO) int {
 	upstream := fs.String("upstream", defaultUpstream, "address of the Postgres server")
 	adminUser := fs.String("admin-user", currentUser(), "role that creates branch databases; password from PGPASSWORD")
 	debug := fs.Bool("debug", false, "log how each connection is attributed")
-	controlPath := fs.String("control", defaultControl(), "control socket for status; empty to disable")
+	controlPath := fs.String("control", defaultControl(), "control socket for status, log and prune; empty to disable")
 	if err := fs.Parse(args); err != nil {
 		return exit.Usage
 	}
@@ -72,16 +73,26 @@ func runServe(ctx context.Context, args []string, std IO) int {
 	w := watch.New(logger, func(c watch.Change) {
 		logger.Info("switched", "worktree", c.Worktree, "from", c.From, "to", c.To)
 		r.Switched(ctx, c.CommonDir, c.From, c.To)
-		p.Sever(c.Worktree)
+		p.Sever(c.Worktree, c.To)
 	})
-	r = router.New(logger, clone.New(admin, logger), w)
+	cloner := clone.New(admin, logger)
+	r = router.New(logger, cloner, w)
 	p = proxy.New(*upstream, r, logger)
 	go w.Run(ctx)
 
 	if *controlPath != "" {
-		if err := serveControl(ctx, *controlPath, p, recent, logger); err != nil {
+		src := control.Source{
+			Status: func() control.Status { return statusOf(p.Conns()) },
+			Events: recent,
+			Pruner: pruneSource{p: prune.New(logger, admin, cloner)},
+		}
+		stopped, err := serveControl(ctx, *controlPath, src, logger)
+		if err != nil {
 			return fail(std, err)
 		}
+		// Returning before the socket is closed would leave it to be removed
+		// later, by whatever path it names by then.
+		defer stopped()
 	}
 
 	logger.Info("serving", "listen", ln.Addr().String(), "upstream", *upstream, "admin_user", *adminUser)
@@ -101,7 +112,8 @@ func printServeUsage(w io.Writer) {
 	fmt.Fprint(w, "  -admin-user NAME  role that creates branch databases (default: the OS user)\n")
 	fmt.Fprint(w, "                    its password is read from PGPASSWORD\n")
 	fmt.Fprint(w, "  -debug            log how each connection is attributed\n")
-	fmt.Fprint(w, "  -control PATH     control socket for status; empty to disable (default: in the state directory)\n")
+	fmt.Fprint(w, "  -control PATH     control socket for status, log and prune; empty to disable\n")
+	fmt.Fprint(w, "                    (default: in the state directory)\n")
 }
 
 func defaultControl() string {
@@ -113,23 +125,25 @@ func defaultControl() string {
 	return path
 }
 
-// serveControl answers pgswitch status on the socket at path until ctx ends.
-func serveControl(ctx context.Context, path string, p proxy.Proxy, log *events.Log, logger *slog.Logger) error {
+// serveControl answers status, log and prune on the socket at path until ctx
+// ends. The func it returns waits until the socket is closed.
+func serveControl(ctx context.Context, path string, src control.Source, logger *slog.Logger) (func(), error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("control socket: %w", err)
+		return nil, fmt.Errorf("control socket: %w", err)
 	}
 	ln, err := control.Listen(ctx, path)
 	if err != nil {
-		return fmt.Errorf("control socket: %w", err)
+		return nil, fmt.Errorf("control socket: %w", err)
 	}
+	done := make(chan struct{})
 	go func() {
-		src := control.Source{Status: func() control.Status { return statusOf(p.Conns()) }, Events: log}
+		defer close(done)
 		if err := control.Serve(ctx, ln, src); err != nil {
 			logger.Warn("control socket", "err", err)
 		}
 	}()
 
-	return nil
+	return func() { <-done }, nil
 }
 
 func currentUser() string {

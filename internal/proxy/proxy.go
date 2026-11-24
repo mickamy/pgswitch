@@ -22,15 +22,16 @@ const (
 var errTooManyNegotiations = errors.New("too many SSL/GSS negotiation requests")
 
 // Route is where a connection goes. Owner, when not empty, names what the
-// connection was attributed to; Sever closes every connection of an owner.
+// connection was attributed to, and Branch the branch checked out there;
+// Sever closes an owner's connections on other branches.
 type Route struct {
 	Database string
 	Owner    string
+	Branch   string
 
 	// What the connection was attributed to, for status. The proxy does not
 	// use them.
 	Repo    string
-	Branch  string
 	PID     int
 	Command string
 }
@@ -65,16 +66,17 @@ func (p Proxy) Conns() []Conn {
 	return p.conns.list()
 }
 
-// Sever closes every connection routed for owner and reports how many. Pools
-// reconnect and are routed afresh.
-func (p Proxy) Sever(owner string) int {
+// Sever closes the connections routed for owner, now on branch, and reports
+// how many. Pools reconnect and are routed afresh. A connection already routed
+// to branch, made after the switch, is kept.
+func (p Proxy) Sever(owner, branch string) int {
 	if owner == "" {
 		return 0
 	}
 
-	n := p.conns.closeAll(owner)
+	n := p.conns.closeAll(owner, branch)
 	if n > 0 {
-		p.logger.Info("severed connections", "owner", owner, "connections", n)
+		p.logger.Info("severed connections", "owner", owner, "branch", branch, "connections", n)
 	}
 
 	return n

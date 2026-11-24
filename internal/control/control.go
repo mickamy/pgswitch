@@ -1,6 +1,7 @@
 package control
 
 import (
+	"bytes"
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
@@ -19,6 +20,8 @@ import (
 const (
 	statusPath        = "/status"
 	logPath           = "/log"
+	prunePath         = "/prune"
+	maxRequestBytes   = 1 << 20
 	readHeaderTimeout = 5 * time.Second
 	shutdownTimeout   = 5 * time.Second
 )
@@ -41,6 +44,41 @@ type Connection struct {
 
 type Status struct {
 	Connections []Connection `json:"connections"`
+}
+
+// PruneCandidate is a database prune would drop.
+type PruneCandidate struct {
+	Database string `json:"database"`
+	// Repo, Branch and Requested are empty for a leftover staging database.
+	Repo      string `json:"repo,omitempty"`
+	Branch    string `json:"branch,omitempty"`
+	Requested string `json:"requested,omitempty"`
+	Reason    string `json:"reason"`
+}
+
+// PruneOutcome is what became of a database prune was asked to drop.
+type PruneOutcome struct {
+	Database string `json:"database"`
+	Dropped  bool   `json:"dropped"`
+	Kept     string `json:"kept,omitempty"`
+}
+
+// Pruner is how serve prunes.
+type Pruner interface {
+	Candidates(ctx context.Context) ([]PruneCandidate, error)
+	Drop(ctx context.Context, databases []string) ([]PruneOutcome, error)
+}
+
+type pruneCandidates struct {
+	Candidates []PruneCandidate `json:"candidates"`
+}
+
+type pruneRequest struct {
+	Databases []string `json:"databases"`
+}
+
+type pruneOutcomes struct {
+	Outcomes []PruneOutcome `json:"outcomes"`
 }
 
 var errLocked = errors.New("control: locked")
@@ -127,17 +165,41 @@ func removeStale(ctx context.Context, path string) error {
 type Source struct {
 	Status func() Status
 	Events *events.Log
+	Pruner Pruner
 }
 
 // Serve answers status and log requests on ln until ctx ends.
 func Serve(ctx context.Context, ln net.Listener, src Source) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+statusPath, func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.MarshalWrite(w, src.Status(), jsontext.AllowInvalidUTF8(true))
+		writeJSON(w, src.Status())
 	})
 	mux.HandleFunc("GET "+logPath, func(w http.ResponseWriter, r *http.Request) {
 		serveLog(ctx.Done(), w, r, src.Events)
+	})
+	mux.HandleFunc("GET "+prunePath, func(w http.ResponseWriter, r *http.Request) {
+		candidates, err := src.Pruner.Candidates(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+
+			return
+		}
+		writeJSON(w, pruneCandidates{Candidates: candidates})
+	})
+	mux.HandleFunc("POST "+prunePath, func(w http.ResponseWriter, r *http.Request) {
+		var req pruneRequest
+		if err := json.UnmarshalRead(http.MaxBytesReader(w, r.Body, maxRequestBytes), &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+
+			return
+		}
+		outcomes, err := src.Pruner.Drop(r.Context(), req.Databases)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+
+			return
+		}
+		writeJSON(w, pruneOutcomes{Outcomes: outcomes})
 	})
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: readHeaderTimeout}
 
@@ -153,6 +215,11 @@ func Serve(ctx context.Context, ln net.Listener, src Source) error {
 	}
 
 	return nil
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.MarshalWrite(w, v, jsontext.AllowInvalidUTF8(true))
 }
 
 // serveLog writes the events kept as JSON lines and, with ?follow=1, the ones
@@ -266,4 +333,57 @@ func (c Client) Log(ctx context.Context, follow bool, fn func(events.Event)) err
 		}
 		fn(e)
 	}
+}
+
+// PruneCandidates lists the databases serve would prune.
+func (c Client) PruneCandidates(ctx context.Context) ([]PruneCandidate, error) {
+	var res pruneCandidates
+	if err := c.call(ctx, http.MethodGet, nil, &res); err != nil {
+		return nil, err
+	}
+
+	return res.Candidates, nil
+}
+
+// Prune asks serve to drop databases, those that are still candidates.
+func (c Client) Prune(ctx context.Context, databases []string) ([]PruneOutcome, error) {
+	var res pruneOutcomes
+	if err := c.call(ctx, http.MethodPost, pruneRequest{Databases: databases}, &res); err != nil {
+		return nil, err
+	}
+
+	return res.Outcomes, nil
+}
+
+// call sends in, unless it is nil, to the prune endpoint and reads the answer
+// into out.
+func (c Client) call(ctx context.Context, method string, in, out any) error {
+	var body io.Reader
+	if in != nil {
+		b, err := json.Marshal(in, jsontext.AllowInvalidUTF8(true))
+		if err != nil {
+			return fmt.Errorf("control: %w", err)
+		}
+		body = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, "http://pgswitch"+prunePath, body)
+	if err != nil {
+		return fmt.Errorf("control: %w", err)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("control: is pgswitch serve running? %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, maxRequestBytes))
+
+		return fmt.Errorf("control: prune: %s: %s", resp.Status, bytes.TrimSpace(msg))
+	}
+	if err := json.UnmarshalRead(resp.Body, out); err != nil {
+		return fmt.Errorf("control: %w", err)
+	}
+
+	return nil
 }

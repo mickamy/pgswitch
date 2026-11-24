@@ -255,7 +255,27 @@ func TestReftable(t *testing.T) {
 	_, _, err = wt.Branch()
 	require.ErrorIs(t, err, git.ErrReftable)
 	_, err = wt.DefaultBranch()
-	assert.ErrorIs(t, err, git.ErrReftable)
+	require.ErrorIs(t, err, git.ErrReftable)
+	_, err = wt.HasBranch("main")
+	assert.ErrorIs(t, err, git.ErrReftable, "no branch is said to be missing")
+}
+
+func TestHasBranch(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t, "main")
+	runGit(t, repo, "branch", "packed/fix-tax")
+	runGit(t, repo, "pack-refs", "--all")
+	runGit(t, repo, "branch", "loose")
+	wt, err := git.Find(repo)
+	require.NoError(t, err)
+
+	branches := map[string]bool{"main": true, "packed/fix-tax": true, "loose": true, "packed": false, "gone": false}
+	for branch, want := range branches {
+		got, err := wt.HasBranch(branch)
+		require.NoError(t, err)
+		assert.Equal(t, want, got, branch)
+	}
 }
 
 func TestWorktrees(t *testing.T) {

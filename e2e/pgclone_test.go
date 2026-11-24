@@ -5,7 +5,9 @@ package e2e_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -243,4 +245,103 @@ func TestPGCloneRenames(t *testing.T) {
 	exists, err := a.Exists(t.Context(), from)
 	require.NoError(t, err)
 	assert.False(t, exists)
+}
+
+func TestPGCloneListsLabeledAndStagingDatabases(t *testing.T) {
+	t.Parallel()
+
+	cfg := adminConfig(t)
+	admin := connect(t, cfg)
+	source := uniqueName("pgswitch_e2e")
+	target := source + "__fix_tax"
+	commented := uniqueName("pgswitch_e2e_commented")
+	createDatabase(t, admin, source)
+	createDatabase(t, admin, commented)
+	require.NoError(t, admin.Exec(t.Context(), `comment on database "`+commented+`" is 'not ours'`))
+	dropOnCleanup(t, admin, target)
+
+	a := pgclone.New(cfg)
+	label := clone.Label{Repo: "/src/shop/.git", Branch: "fix-tax", Database: source}
+	require.NoError(t, a.Copy(t.Context(), source, target, label))
+
+	labels, err := a.Labels(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, label, labels[target])
+	assert.NotContains(t, labels, source, "the source is not a branch database")
+	assert.NotContains(t, labels, commented, "a comment pgswitch did not write is no label")
+}
+
+// TestPGCloneListsAbandonedStaging lists only staging databases a copy marked
+// and no pgswitch is still building.
+func TestPGCloneListsAbandonedStaging(t *testing.T) {
+	t.Parallel()
+
+	cfg := adminConfig(t)
+	admin := connect(t, cfg)
+	mark := func(db string) {
+		require.NoError(t, admin.Exec(t.Context(), `comment on database "`+db+`" is '{"pgswitch":1,"staging":true}'`))
+	}
+
+	abandoned := uniqueName("pgswitch_staging_e2e")
+	createDatabase(t, admin, abandoned)
+	mark(abandoned)
+
+	// Another pgswitch copying into it holds its lock on the postgres database.
+	building := uniqueName("pgswitch_staging_e2e")
+	createDatabase(t, admin, building)
+	mark(building)
+	copier := connect(t, cfg)
+	require.NoError(t, copier.Exec(t.Context(),
+		"select pg_advisory_lock(hashtext('pgswitch'), hashtext('"+building+"'))"))
+
+	// An application's own databases whose names happen to start alike.
+	app := uniqueName("pgswitch_staging_app")
+	appBranch := app + "__fix_tax"
+	createDatabase(t, admin, app)
+	dropOnCleanup(t, admin, appBranch)
+	a := pgclone.New(cfg)
+	require.NoError(t, a.Copy(t.Context(), app, appBranch,
+		clone.Label{Repo: "/src/shop/.git", Branch: "fix-tax", Database: app}))
+
+	names, err := a.AbandonedStaging(t.Context())
+	require.NoError(t, err)
+	assert.Contains(t, names, abandoned)
+	assert.NotContains(t, names, building, "a copy under way elsewhere is left alone")
+	assert.NotContains(t, names, app, "an unmarked database is not staging")
+	assert.NotContains(t, names, appBranch, "a labeled branch database is not staging")
+
+	require.NoError(t, copier.Close())
+	require.Eventually(t, func() bool {
+		names, err := a.AbandonedStaging(t.Context())
+		require.NoError(t, err)
+
+		return slices.Contains(names, building)
+	}, 5*time.Second, 50*time.Millisecond, "listed once its copier is gone")
+}
+
+func TestPGCloneDrops(t *testing.T) {
+	t.Parallel()
+
+	cfg := adminConfig(t)
+	admin := connect(t, cfg)
+	db := uniqueName("pgswitch_e2e")
+	createDatabase(t, admin, db)
+
+	onDB := cfg
+	onDB.Database = db
+	session := connect(t, onDB)
+
+	a := pgclone.New(cfg)
+	require.ErrorIs(t, a.Drop(t.Context(), db), clone.ErrInUse, "a session is still on it")
+	exists, err := a.Exists(t.Context(), db)
+	require.NoError(t, err)
+	assert.True(t, exists)
+	require.NoError(t, session.Exec(t.Context(), "select 1"), "the session is left alone")
+
+	require.NoError(t, session.Close())
+	require.Eventually(t, func() bool { return a.Drop(t.Context(), db) == nil }, 5*time.Second, 50*time.Millisecond)
+	exists, err = a.Exists(t.Context(), db)
+	require.NoError(t, err)
+	assert.False(t, exists)
+	require.NoError(t, a.Drop(t.Context(), db), "a database already gone is not an error")
 }

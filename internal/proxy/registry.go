@@ -41,13 +41,13 @@ func (r *registry) add(conn net.Conn, info Conn) func() {
 	}
 }
 
-// closeAll closes owner's connections and forgets them at once, so they are
-// counted and listed only once.
-func (r *registry) closeAll(owner string) int {
+// closeAll closes owner's connections not routed to branch and forgets them
+// at once, so they are counted and listed only once.
+func (r *registry) closeAll(owner, branch string) int {
 	r.mu.Lock()
 	var conns []net.Conn
 	for conn, info := range r.conns {
-		if info.Owner == owner {
+		if info.Owner == owner && info.Branch != branch {
 			conns = append(conns, conn)
 			delete(r.conns, conn)
 		}

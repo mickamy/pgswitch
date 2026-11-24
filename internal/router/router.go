@@ -213,7 +213,7 @@ func (r Router) resolve(ctx context.Context, client, server net.Addr, database s
 
 	return attribution{
 		route:       rt,
-		label:       clone.Label{Repo: wt.CommonDir, Branch: branch, Database: database},
+		label:       clone.Label{Repo: repoID, Branch: branch, Database: database},
 		sources:     sources,
 		renamedFrom: renamedFrom,
 	}
@@ -247,7 +247,7 @@ func (r Router) followRename(ctx context.Context, commonDir, from, to string) {
 	for _, db := range r.databases.of(commonDir) {
 		oldName := route.PhysicalName(repoID, db, from, defaultBranch)
 		newName := route.PhysicalName(repoID, db, to, defaultBranch)
-		label := clone.Label{Repo: commonDir, Branch: to, Database: db}
+		label := clone.Label{Repo: repoID, Branch: to, Database: db}
 		if err := r.cloner.Rename(ctx, oldName, newName, label); err != nil {
 			logger.Warn("follow branch rename", "database", db, "err", err)
 		}
