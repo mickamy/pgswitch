@@ -13,3 +13,8 @@ func StubTerminal(t *testing.T) {
 	isTerminal = func(io.Reader) bool { return true }
 	t.Cleanup(func() { isTerminal = orig })
 }
+
+var (
+	ReadPassword  = readPassword
+	WritePassword = writePassword
+)

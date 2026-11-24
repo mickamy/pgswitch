@@ -9,8 +9,10 @@ import (
 )
 
 const (
-	appName    = "pgswitch"
-	socketName = "pgswitch.sock"
+	appName      = "pgswitch"
+	socketName   = "pgswitch.sock"
+	passwordName = "admin-password"
+	logName      = "pgswitch.log"
 )
 
 // Dir is where pgswitch keeps its state: ~/Library/Application Support on
@@ -24,12 +26,26 @@ func Dir() (string, error) {
 
 // Socket is the control socket serve listens on.
 func Socket() (string, error) {
+	return in(socketName)
+}
+
+// PasswordFile keeps the default upstream's admin password for the service.
+func PasswordFile() (string, error) {
+	return in(passwordName)
+}
+
+// LogFile is where the service writes what serve logs, under launchd.
+func LogFile() (string, error) {
+	return in(logName)
+}
+
+func in(name string) (string, error) {
 	d, err := Dir()
 	if err != nil {
 		return "", err
 	}
 
-	return filepath.Join(d, socketName), nil
+	return filepath.Join(d, name), nil
 }
 
 func dir(goos string, getenv func(string) string, home, config string) (string, error) {
