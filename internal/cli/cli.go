@@ -46,6 +46,12 @@ var commands = []command{
 		usage:   printStatusUsage,
 	},
 	{
+		name:    "service",
+		summary: "Install or uninstall serve as a login service",
+		run:     runService,
+		usage:   printServiceUsage,
+	},
+	{
 		name:    "prune",
 		summary: "Drop databases whose branch or repository is gone",
 		run:     runPrune,
