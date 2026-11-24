@@ -45,6 +45,12 @@ var commands = []command{
 		run:     runStatus,
 		usage:   printStatusUsage,
 	},
+	{
+		name:    "prune",
+		summary: "Drop databases whose branch or repository is gone",
+		run:     runPrune,
+		usage:   printPruneUsage,
+	},
 }
 
 func Run(ctx context.Context, args []string, std IO) int {

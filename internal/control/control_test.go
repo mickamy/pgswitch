@@ -2,6 +2,7 @@ package control_test
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"runtime"
@@ -285,4 +286,71 @@ func TestLogFollow(t *testing.T) { //nolint:paralleltest // t.Chdir changes the 
 	case <-time.After(5 * time.Second):
 		require.FailNow(t, "following did not end with serve")
 	}
+}
+
+type fakePruner struct {
+	candidates []control.PruneCandidate
+	asked      []string
+	err        error
+}
+
+var _ control.Pruner = (*fakePruner)(nil)
+
+func (p *fakePruner) Candidates(context.Context) ([]control.PruneCandidate, error) {
+	return p.candidates, p.err
+}
+
+func (p *fakePruner) Drop(_ context.Context, databases []string) ([]control.PruneOutcome, error) {
+	p.asked = databases
+	if p.err != nil {
+		return nil, p.err
+	}
+	outcomes := make([]control.PruneOutcome, len(databases))
+	for i, db := range databases {
+		outcomes[i] = control.PruneOutcome{Database: db, Dropped: true}
+	}
+
+	return outcomes, nil
+}
+
+func servePruner(t *testing.T, p control.Pruner) {
+	t.Helper()
+
+	serveSource(t, control.Source{
+		Status: func() control.Status { return control.Status{} },
+		Events: events.New(),
+		Pruner: p,
+	})
+}
+
+func TestPrune(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
+	t.Chdir(t.TempDir())
+	want := []control.PruneCandidate{
+		{Database: "shop_test__fix_tax_708dc013", Repo: "/src/shop/.git", Branch: "fix-tax", Requested: "shop_test",
+			Reason: "branch gone"},
+		{Database: "pgswitch_staging_0123456789abcdef", Reason: "leftover staging"},
+	}
+	p := &fakePruner{candidates: want}
+	servePruner(t, p)
+	client := control.NewClient(socket)
+
+	got, err := client.PruneCandidates(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+
+	outcomes, err := client.Prune(t.Context(), []string{"shop_test__fix_tax_708dc013"})
+	require.NoError(t, err)
+	assert.Equal(t, []control.PruneOutcome{{Database: "shop_test__fix_tax_708dc013", Dropped: true}}, outcomes)
+	assert.Equal(t, []string{"shop_test__fix_tax_708dc013"}, p.asked)
+}
+
+func TestPruneReportsServeErrors(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
+	t.Chdir(t.TempDir())
+	servePruner(t, &fakePruner{err: errors.New("pgclone: connection refused")})
+	client := control.NewClient(socket)
+
+	_, err := client.PruneCandidates(t.Context())
+	require.ErrorContains(t, err, "pgclone: connection refused")
+	_, err = client.Prune(t.Context(), []string{"shop_test__fix_tax_708dc013"})
+	require.ErrorContains(t, err, "pgclone: connection refused")
 }
