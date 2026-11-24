@@ -13,6 +13,7 @@ import (
 	"github.com/mickamy/pgswitch/internal/clone"
 	"github.com/mickamy/pgswitch/internal/clone/pgclone"
 	"github.com/mickamy/pgswitch/internal/control"
+	"github.com/mickamy/pgswitch/internal/docker"
 	"github.com/mickamy/pgswitch/internal/events"
 	"github.com/mickamy/pgswitch/internal/exit"
 	"github.com/mickamy/pgswitch/internal/pgadmin"
@@ -89,7 +90,8 @@ func runServe(ctx context.Context, args []string, std IO) int {
 		p.Sever(c.Worktree, c.To)
 	})
 	servers.Get(byDefault) // known to prune from the start
-	r = router.New(logger, byDefault, func(u upstream.Upstream) router.Cloner { return servers.Get(u).cloner }, w)
+	r = router.New(logger, byDefault, func(u upstream.Upstream) router.Cloner { return servers.Get(u).cloner },
+		dockerFinder(logger), w)
 	p = proxy.New(*upstreamAddr, r, logger)
 	go w.Run(ctx)
 
@@ -175,6 +177,20 @@ func serveControl(ctx context.Context, path string, src control.Source, logger *
 	}()
 
 	return func() { <-done }, nil
+}
+
+// dockerFinder finds repositories' Postgres through Docker, or is nil when
+// there is no Docker to ask.
+func dockerFinder(logger *slog.Logger) router.PostgresFinder {
+	home, _ := os.UserHomeDir()
+	socket, err := docker.Socket(docker.Env{Home: home, Getenv: os.Getenv})
+	if err != nil {
+		logger.Debug("not looking for Postgres in Docker", "err", err)
+
+		return nil
+	}
+
+	return docker.NewClient(socket)
 }
 
 // server is what pgswitch keeps per upstream: one cloner, so clones and drops
