@@ -48,13 +48,13 @@ const (
 // Admin lists what pgswitch left on the server.
 type Admin interface {
 	Labels(ctx context.Context) (map[string]clone.Label, error)
-	Staging(ctx context.Context) ([]string, error)
+	// AbandonedStaging lists the staging databases no copy is building.
+	AbandonedStaging(ctx context.Context) ([]string, error)
 }
 
 // Dropper drops a database while nothing else creates or renames to it.
 type Dropper interface {
 	Drop(ctx context.Context, db string, check func(context.Context) (bool, error)) (bool, error)
-	Idle() bool
 }
 
 // Pruner finds the databases whose branch or repository is gone and drops
@@ -76,13 +76,10 @@ func (p Pruner) Candidates(ctx context.Context) ([]Candidate, error) {
 	if err != nil {
 		return nil, fmt.Errorf("prune: %w", err)
 	}
-	// Listed before asking whether a clone is under way: a clone that starts
-	// later builds under a name not in the list.
-	staging, err := p.admin.Staging(ctx)
+	staging, err := p.admin.AbandonedStaging(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("prune: %w", err)
 	}
-	idle := p.dropper.Idle()
 
 	var candidates []Candidate
 	for db, label := range labels {
@@ -96,10 +93,8 @@ func (p Pruner) Candidates(ctx context.Context) ([]Candidate, error) {
 			candidates = append(candidates, Candidate{Database: db, Label: label, Reason: reason})
 		}
 	}
-	if idle {
-		for _, db := range staging {
-			candidates = append(candidates, Candidate{Database: db, Reason: Leftover})
-		}
+	for _, db := range staging {
+		candidates = append(candidates, Candidate{Database: db, Reason: Leftover})
 	}
 	slices.SortFunc(candidates, func(a, b Candidate) int { return cmp.Compare(a.Database, b.Database) })
 

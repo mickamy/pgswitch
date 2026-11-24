@@ -30,11 +30,10 @@ var _ prune.Admin = fakeAdmin{}
 
 func (a fakeAdmin) Labels(context.Context) (map[string]clone.Label, error) { return a.labels, nil }
 
-func (a fakeAdmin) Staging(context.Context) ([]string, error) { return a.staging, nil }
+func (a fakeAdmin) AbandonedStaging(context.Context) ([]string, error) { return a.staging, nil }
 
 type fakeDropper struct {
 	mu      sync.Mutex
-	busy    bool
 	inUse   map[string]bool
 	dropped []string
 	// beforeCheck runs inside Drop, before the check.
@@ -62,8 +61,6 @@ func (d *fakeDropper) Drop(ctx context.Context, db string, check func(context.Co
 
 	return true, nil
 }
-
-func (d *fakeDropper) Idle() bool { return !d.busy }
 
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
@@ -134,36 +131,14 @@ func TestCandidates(t *testing.T) {
 		staging: []string{"pgswitch_staging_0123456789abcdef"},
 	}
 
-	tests := map[string]struct {
-		busy bool
-		want []prune.Candidate
-	}{
-		"idle": {
-			want: sorted(
-				prune.Candidate{Database: goneDB, Label: goneLabel, Reason: prune.BranchGone},
-				prune.Candidate{Database: removedDB, Label: removedLabel, Reason: prune.RepoGone},
-				prune.Candidate{Database: "pgswitch_staging_0123456789abcdef", Reason: prune.Leftover},
-			),
-		},
-		"a clone under way may own the staging database": {
-			busy: true,
-			want: sorted(
-				prune.Candidate{Database: goneDB, Label: goneLabel, Reason: prune.BranchGone},
-				prune.Candidate{Database: removedDB, Label: removedLabel, Reason: prune.RepoGone},
-			),
-		},
-	}
+	got, err := newPruner(admin, &fakeDropper{}).Candidates(t.Context())
+	require.NoError(t, err)
 
-	for name, tt := range tests {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-
-			got, err := newPruner(admin, &fakeDropper{busy: tt.busy}).Candidates(t.Context())
-			require.NoError(t, err)
-
-			assert.Equal(t, tt.want, got)
-		})
-	}
+	assert.Equal(t, sorted(
+		prune.Candidate{Database: goneDB, Label: goneLabel, Reason: prune.BranchGone},
+		prune.Candidate{Database: removedDB, Label: removedLabel, Reason: prune.RepoGone},
+		prune.Candidate{Database: "pgswitch_staging_0123456789abcdef", Reason: prune.Leftover},
+	), got)
 }
 
 func TestDrop(t *testing.T) {

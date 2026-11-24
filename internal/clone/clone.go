@@ -163,14 +163,6 @@ func (c *Cloner) Drop(ctx context.Context, db string, check func(context.Context
 	}
 }
 
-// Idle reports whether no clone, rename or drop is under way.
-func (c *Cloner) Idle() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return len(c.flights) == 0
-}
-
 // Wait blocks while db is held as the source of a clone, or while it is being
 // dropped.
 func (c *Cloner) Wait(ctx context.Context, db string) error {

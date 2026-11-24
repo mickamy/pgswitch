@@ -581,7 +581,6 @@ func TestDropHoldsTheDatabase(t *testing.T) {
 		dropping <- err
 	}()
 	<-inCheck
-	assert.False(t, c.Idle())
 
 	waited := make(chan error, 1)
 	go func() { waited <- c.Wait(t.Context(), renamed) }()
@@ -600,5 +599,4 @@ func TestDropHoldsTheDatabase(t *testing.T) {
 	require.NoError(t, <-waited)
 	require.NoError(t, <-renaming)
 	assert.Equal(t, []string{target + "->" + renamed}, admin.renamed(), "the rename ran after the drop")
-	assert.True(t, c.Idle())
 }

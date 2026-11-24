@@ -165,26 +165,58 @@ func (a Admin) Labels(ctx context.Context) (map[string]clone.Label, error) {
 	return labels, nil
 }
 
-// Staging lists the databases under staging names: copies under way, or left
-// behind by ones that never finished.
-func (a Admin) Staging(ctx context.Context) ([]string, error) {
+// AbandonedStaging lists the staging databases of copies that never finished:
+// marked as staging by a copy, which no longer holds its lock. Any pgswitch on
+// the server holds that lock while it copies, so a copy under way elsewhere is
+// left out too.
+func (a Admin) AbandonedStaging(ctx context.Context) ([]string, error) {
 	conn, done, err := a.connect(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer done()
 
-	rows, err := conn.Query(ctx, "select datname from pg_database"+
+	rows, err := conn.Query(ctx, "select datname, shobj_description(oid, 'pg_database') from pg_database"+
 		" where starts_with(datname::text, "+quote.Literal(stagingPrefix)+") order by datname")
 	if err != nil {
 		return nil, fmt.Errorf("pgclone: %w", err)
 	}
-	names := make([]string, len(rows))
-	for i, row := range rows {
-		names[i] = row[0].String
+	var names []string
+	for _, row := range rows {
+		name := row[0].String
+		if !row[1].Valid || !isStagingComment(row[1].String) {
+			continue
+		}
+		// Taking the lock proves its copy is gone; it is released when
+		// conn closes. No copy can take the name up again, since it exists.
+		locked, err := tryStagingLock(ctx, conn, name)
+		if err != nil {
+			return nil, err
+		}
+		if locked {
+			names = append(names, name)
+		}
 	}
 
 	return names, nil
+}
+
+// Every pgswitch takes staging locks on the admin connection's database,
+// postgres unless configured otherwise, as advisory locks are per database.
+func stagingLockKey(staging string) string {
+	return "hashtext('pgswitch'), hashtext(" + quote.Literal(staging) + ")"
+}
+
+func tryStagingLock(ctx context.Context, conn pgadmin.Conn, staging string) (bool, error) {
+	rows, err := conn.Query(ctx, "select pg_try_advisory_lock("+stagingLockKey(staging)+")")
+	if err != nil {
+		return false, fmt.Errorf("pgclone: lock %s: %w", staging, err)
+	}
+	if len(rows) != 1 || len(rows[0]) != 1 {
+		return false, errors.New("pgclone: unexpected result from pg_try_advisory_lock")
+	}
+
+	return rows[0][0].String == "t", nil
 }
 
 // Drop drops db unless it has sessions, in which case it returns
@@ -208,20 +240,39 @@ func (a Admin) Drop(ctx context.Context, db string) error {
 	}
 }
 
-// createStaging copies source under a fresh name. It never drops a database it
-// did not create: a name that is taken is skipped, not reclaimed.
+// createStaging copies source under a fresh name and marks it as staging. It
+// never drops a database it did not create: a name that is taken is skipped,
+// not reclaimed. conn holds the staging lock until it closes.
 func (a Admin) createStaging(ctx context.Context, conn pgadmin.Conn, source, owner string) (string, error) {
 	for range stagingAttempts {
 		staging := a.newStagingName()
-		err := conn.Exec(ctx, "create database "+quote.Ident(staging)+
+		locked, err := tryStagingLock(ctx, conn, staging)
+		if err != nil {
+			return "", err
+		}
+		if !locked {
+			continue
+		}
+
+		err = conn.Exec(ctx, "create database "+quote.Ident(staging)+
 			" template "+quote.Ident(source)+
 			" owner "+quote.Ident(owner)+
 			" strategy file_copy")
 		var serverErr pgwire.ServerError
 		switch {
 		case err == nil:
+			if err := conn.Exec(ctx, stagingComment(staging)); err != nil {
+				_ = dropDatabase(context.WithoutCancel(ctx), conn, staging)
+
+				return "", fmt.Errorf("pgclone: mark %s: %w", staging, err)
+			}
+
 			return staging, nil
 		case errors.As(err, &serverErr) && serverErr.Code == codeDuplicateDatabase:
+			if err := conn.Exec(ctx, "select pg_advisory_unlock("+stagingLockKey(staging)+")"); err != nil {
+				return "", fmt.Errorf("pgclone: %w", err)
+			}
+
 			continue
 		case errors.As(err, &serverErr) && serverErr.Code == codeObjectInUse:
 			return "", fmt.Errorf("%w: %w", clone.ErrSourceBusy, err)
@@ -234,7 +285,7 @@ func (a Admin) createStaging(ctx context.Context, conn pgadmin.Conn, source, own
 }
 
 // finish copies what CREATE DATABASE leaves behind, then publishes staging as
-// target.
+// target, labeled.
 func finish(ctx context.Context, conn pgadmin.Conn, source, staging, target, owner string, label clone.Label) error {
 	if err := copyPrivileges(ctx, conn, source, staging, owner); err != nil {
 		return err
@@ -242,15 +293,14 @@ func finish(ctx context.Context, conn pgadmin.Conn, source, staging, target, own
 	if err := copySettings(ctx, conn, source, staging); err != nil {
 		return err
 	}
-	comment, err := labelComment(staging, label)
+	comment, err := labelComment(target, label)
 	if err != nil {
 		return err
 	}
-	if err := conn.Exec(ctx, comment); err != nil {
-		return fmt.Errorf("pgclone: label %s: %w", target, err)
-	}
 
-	err = conn.Exec(ctx, "alter database "+quote.Ident(staging)+" rename to "+quote.Ident(target))
+	// Relabeled as it is renamed, so a database under a staging name always
+	// carries the staging mark.
+	err = conn.Exec(ctx, "alter database "+quote.Ident(staging)+" rename to "+quote.Ident(target)+"; "+comment)
 	var serverErr pgwire.ServerError
 	if errors.As(err, &serverErr) && serverErr.Code == codeDuplicateDatabase {
 		return dropDatabase(ctx, conn, staging)

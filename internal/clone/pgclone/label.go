@@ -11,12 +11,14 @@ import (
 
 const labelVersion = 1
 
-// labelJSON is how a clone.Label is kept in COMMENT ON DATABASE.
+// labelJSON is how a clone.Label, or the staging mark, is kept in COMMENT ON
+// DATABASE.
 type labelJSON struct {
 	Version  int    `json:"pgswitch"`
-	Repo     string `json:"repo"`
-	Branch   string `json:"branch"`
-	Database string `json:"database"`
+	Staging  bool   `json:"staging,omitzero"`
+	Repo     string `json:"repo,omitempty"`
+	Branch   string `json:"branch,omitempty"`
+	Database string `json:"database,omitempty"`
 }
 
 // labelComment returns the statement that labels db.
@@ -34,13 +36,36 @@ func labelComment(db string, label clone.Label) (string, error) {
 	return "comment on database " + quote.Ident(db) + " is " + quote.Literal(string(b)), nil
 }
 
+// stagingComment returns the statement that marks db as a copy being built.
+func stagingComment(db string) string {
+	b, _ := json.Marshal(labelJSON{Version: labelVersion, Staging: true})
+
+	return "comment on database " + quote.Ident(db) + " is " + quote.Literal(string(b))
+}
+
 // parseLabel reads a comment labelComment wrote. ok is false for any other
-// comment.
+// comment, the staging mark included.
 func parseLabel(comment string) (label clone.Label, ok bool) {
-	var l labelJSON
-	if err := json.Unmarshal([]byte(comment), &l); err != nil || l.Version != labelVersion {
+	l, ok := parseComment(comment)
+	if !ok || l.Staging {
 		return clone.Label{}, false
 	}
 
 	return clone.Label{Repo: l.Repo, Branch: l.Branch, Database: l.Database}, true
+}
+
+// isStagingComment reports whether comment is the mark stagingComment wrote.
+func isStagingComment(comment string) bool {
+	l, ok := parseComment(comment)
+
+	return ok && l.Staging
+}
+
+func parseComment(comment string) (labelJSON, bool) {
+	var l labelJSON
+	if err := json.Unmarshal([]byte(comment), &l); err != nil || l.Version != labelVersion {
+		return labelJSON{}, false
+	}
+
+	return l, true
 }

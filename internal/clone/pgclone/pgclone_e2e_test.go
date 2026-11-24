@@ -112,3 +112,37 @@ func TestCopySkipsATakenStagingName(t *testing.T) {
 	require.NoError(t, err, "the session on the taken database survives")
 	assert.Equal(t, "mine", rows[0][0].String)
 }
+
+// TestCopySkipsALockedStagingName gives Copy a staging name another pgswitch
+// is about to build under: Copy must leave it to that one.
+func TestCopySkipsALockedStagingName(t *testing.T) {
+	t.Parallel()
+
+	cfg := adminConfig(t)
+	admin := connect(t, cfg)
+
+	locked := uniqueName("pgswitch_staging_locked")
+	fresh := uniqueName("pgswitch_staging_fresh")
+	source := uniqueName("pgswitch_e2e")
+	target := source + "__fix_tax"
+	createDatabase(t, admin, source)
+	dropOnCleanup(t, admin, locked)
+	dropOnCleanup(t, admin, fresh)
+	dropOnCleanup(t, admin, target)
+	copier := connect(t, cfg)
+	require.NoError(t, copier.Exec(t.Context(),
+		"select pg_advisory_lock(hashtext('pgswitch'), hashtext('"+locked+"'))"))
+
+	names := []string{locked, fresh}
+	a := pgclone.WithStagingNames(pgclone.New(cfg), func() string {
+		name := names[0]
+		names = names[1:]
+
+		return name
+	})
+
+	require.NoError(t, a.Copy(t.Context(), source, target, clone.Label{}))
+
+	assert.True(t, exists(t, admin, target))
+	assert.False(t, exists(t, admin, locked), "the locked name was not used")
+}
