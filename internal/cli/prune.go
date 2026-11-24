@@ -32,11 +32,14 @@ func runPrune(ctx context.Context, args []string, std IO) int {
 	}
 
 	client := control.NewClient(*controlPath)
-	report := pruneReport{}
-	var err error
-	if report.Candidates, err = client.PruneCandidates(ctx); err != nil {
+	listing, err := client.PruneCandidates(ctx)
+	if err != nil {
 		return fail(std, err)
 	}
+	for _, s := range listing.Skipped {
+		fmt.Fprintf(std.Err, "%s prune: skipped %s: %s\n", Name, s.Upstream, s.Error)
+	}
+	report := pruneReport{Candidates: listing.Candidates, Skipped: listing.Skipped}
 	if len(report.Candidates) == 0 {
 		return finishPrune(std, report, *asJSON, "nothing to prune")
 	}
@@ -60,11 +63,11 @@ func runPrune(ctx context.Context, args []string, std IO) int {
 		printCandidates(std.Out, report.Candidates)
 	}
 
-	names := make([]string, len(report.Candidates))
+	targets := make([]control.PruneTarget, len(report.Candidates))
 	for i, c := range report.Candidates {
-		names[i] = c.Database
+		targets[i] = control.PruneTarget{Upstream: c.Upstream, Database: c.Database}
 	}
-	if report.Outcomes, err = client.Prune(ctx, names); err != nil {
+	if report.Outcomes, err = client.Prune(ctx, targets); err != nil {
 		return fail(std, err)
 	}
 
@@ -73,6 +76,7 @@ func runPrune(ctx context.Context, args []string, std IO) int {
 
 type pruneReport struct {
 	Candidates []control.PruneCandidate `json:"candidates"`
+	Skipped    []control.PruneSkipped   `json:"skipped,omitempty"`
 	Outcomes   []control.PruneOutcome   `json:"outcomes,omitempty"`
 }
 
@@ -94,9 +98,9 @@ func finishPrune(std IO, report pruneReport, asJSON bool, note string) int {
 	}
 	for _, o := range report.Outcomes {
 		if o.Dropped {
-			fmt.Fprintf(std.Out, "dropped %s\n", o.Database)
+			fmt.Fprintf(std.Out, "dropped %s on %s\n", o.Database, o.Upstream)
 		} else {
-			fmt.Fprintf(std.Out, "kept %s (%s)\n", o.Database, o.Kept)
+			fmt.Fprintf(std.Out, "kept %s on %s (%s)\n", o.Database, o.Upstream, o.Kept)
 		}
 	}
 
@@ -105,13 +109,13 @@ func finishPrune(std IO, report pruneReport, asJSON bool, note string) int {
 
 func printCandidates(w io.Writer, candidates []control.PruneCandidate) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "REPO\tBRANCH\tDATABASE\tREASON")
+	fmt.Fprintln(tw, "UPSTREAM\tREPO\tBRANCH\tDATABASE\tREASON")
 	for _, c := range candidates {
 		repo, branch := "-", "-"
 		if c.Repo != "" {
 			repo, branch = repoPath(c.Repo), c.Branch
 		}
-		fmt.Fprintln(tw, strings.Join([]string{repo, branch, c.Database, c.Reason}, "\t"))
+		fmt.Fprintln(tw, strings.Join([]string{c.Upstream, repo, branch, c.Database, c.Reason}, "\t"))
 	}
 	_ = tw.Flush() // prune output: nothing useful to do with a write error
 }
@@ -146,7 +150,9 @@ var isTerminal = func(r io.Reader) bool {
 func printPruneUsage(w io.Writer) {
 	fmt.Fprintf(w, "Usage: %s prune [flags]\n\n", Name)
 	fmt.Fprint(w, "Drop the branch databases whose branch or repository is gone, and copies\n")
-	fmt.Fprint(w, "that never finished, after asking. A database still in use is kept.\n\n")
+	fmt.Fprint(w, "that never finished, after asking, on every upstream serve knows of: its own\n")
+	fmt.Fprint(w, "and those named by .pgswitch.toml since it started. A database still in use\n")
+	fmt.Fprint(w, "is kept.\n\n")
 	fmt.Fprint(w, "Flags:\n")
 	fmt.Fprint(w, "  -control PATH  control socket of the running serve (default: in the state directory)\n")
 	fmt.Fprint(w, "  -yes           drop without asking\n")
@@ -160,14 +166,12 @@ type pruneSource struct {
 
 var _ control.Pruner = pruneSource{}
 
-func (s pruneSource) Candidates(ctx context.Context) ([]control.PruneCandidate, error) {
-	candidates, err := s.p.Candidates(ctx)
-	if err != nil {
-		return nil, err //nolint:wrapcheck // prune's errors say where they come from
-	}
-	out := make([]control.PruneCandidate, len(candidates))
+func (s pruneSource) Candidates(ctx context.Context) (control.PruneListing, error) {
+	candidates, skipped := s.p.Candidates(ctx)
+	out := control.PruneListing{Candidates: make([]control.PruneCandidate, len(candidates))}
 	for i, c := range candidates {
-		out[i] = control.PruneCandidate{
+		out.Candidates[i] = control.PruneCandidate{
+			Upstream:  c.Upstream,
 			Database:  c.Database,
 			Repo:      c.Label.Repo,
 			Branch:    c.Label.Branch,
@@ -175,18 +179,22 @@ func (s pruneSource) Candidates(ctx context.Context) ([]control.PruneCandidate, 
 			Reason:    string(c.Reason),
 		}
 	}
+	for _, sk := range skipped {
+		out.Skipped = append(out.Skipped, control.PruneSkipped{Upstream: sk.Upstream, Error: sk.Err.Error()})
+	}
 
 	return out, nil
 }
 
-func (s pruneSource) Drop(ctx context.Context, databases []string) ([]control.PruneOutcome, error) {
-	outcomes, err := s.p.Drop(ctx, databases)
-	if err != nil {
-		return nil, err //nolint:wrapcheck // prune's errors say where they come from
+func (s pruneSource) Drop(ctx context.Context, targets []control.PruneTarget) ([]control.PruneOutcome, error) {
+	in := make([]prune.Target, len(targets))
+	for i, t := range targets {
+		in[i] = prune.Target{Upstream: t.Upstream, Database: t.Database}
 	}
+	outcomes := s.p.Drop(ctx, in)
 	out := make([]control.PruneOutcome, len(outcomes))
 	for i, o := range outcomes {
-		out[i] = control.PruneOutcome{Database: o.Database, Dropped: o.Dropped, Kept: o.Kept}
+		out[i] = control.PruneOutcome{Upstream: o.Upstream, Database: o.Database, Dropped: o.Dropped, Kept: o.Kept}
 	}
 
 	return out, nil

@@ -21,11 +21,13 @@ const (
 
 var errTooManyNegotiations = errors.New("too many SSL/GSS negotiation requests")
 
-// Route is where a connection goes. Owner, when not empty, names what the
-// connection was attributed to, and Branch the branch checked out there;
-// Sever closes an owner's connections on other branches.
+// Route is where a connection goes: Database on Upstream, the proxy's own
+// upstream when empty. Owner, when not empty, names what the connection was
+// attributed to, and Branch the branch checked out there; Sever closes an
+// owner's connections on other branches.
 type Route struct {
 	Database string
+	Upstream string
 	Owner    string
 	Branch   string
 
@@ -51,6 +53,7 @@ func (f RouterFunc) Route(ctx context.Context, client, server net.Addr, database
 }
 
 type Proxy struct {
+	// upstream is where a route without one goes.
 	upstream string
 	router   Router
 	logger   *slog.Logger
@@ -142,6 +145,9 @@ func (p Proxy) handle(ctx context.Context, client net.Conn) {
 
 		return
 	}
+	if route.Upstream == "" {
+		route.Upstream = p.upstream
+	}
 	// Registered before the upstream connection, so a switch from here on
 	// severs it.
 	defer p.conns.add(client, Conn{
@@ -152,7 +158,7 @@ func (p Proxy) handle(ctx context.Context, client net.Conn) {
 	})()
 
 	var d net.Dialer
-	upstream, err := d.DialContext(ctx, "tcp", p.upstream)
+	upstream, err := d.DialContext(ctx, "tcp", route.Upstream)
 	if err != nil {
 		reject(client, logger, pgwire.CodeConnectionFailure, "pgswitch: connect to upstream: "+err.Error())
 
@@ -165,7 +171,8 @@ func (p Proxy) handle(ctx context.Context, client net.Conn) {
 
 		return
 	}
-	logger.Info("routed", "database", requested, "physical", route.Database, "owner", route.Owner)
+	logger.Info("routed", "database", requested, "physical", route.Database, "upstream", route.Upstream,
+		"owner", route.Owner)
 
 	splice(client, upstream)
 }
@@ -209,11 +216,26 @@ func logNegotiationError(logger *slog.Logger, err error) {
 	}
 }
 
-// forwardCancel relays a CancelRequest verbatim: there is one upstream, so the
-// backend key is valid there whatever database the backend serves.
+// forwardCancel relays a CancelRequest verbatim to the upstream of every
+// connection being relayed, or to its own upstream when there is none. The
+// proxy does not read the backend keys, so it cannot tell which upstream the
+// key belongs to; the others find no backend with it and ignore it.
 func (p Proxy) forwardCancel(ctx context.Context, pkt pgwire.Packet, logger *slog.Logger) {
+	upstreams := p.conns.upstreams()
+	if len(upstreams) == 0 {
+		upstreams = []string{p.upstream}
+	}
+
+	var wg sync.WaitGroup
+	for _, upstream := range upstreams {
+		wg.Go(func() { forwardCancelTo(ctx, upstream, pkt, logger.With("upstream", upstream)) })
+	}
+	wg.Wait()
+}
+
+func forwardCancelTo(ctx context.Context, addr string, pkt pgwire.Packet, logger *slog.Logger) {
 	var d net.Dialer
-	upstream, err := d.DialContext(ctx, "tcp", p.upstream)
+	upstream, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		logger.Warn("forward cancel", "err", err)
 

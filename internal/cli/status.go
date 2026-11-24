@@ -67,6 +67,7 @@ func statusOf(conns []proxy.Conn) control.Status {
 			Repo:      c.Repo,
 			Worktree:  c.Owner,
 			Branch:    c.Branch,
+			Upstream:  c.Upstream,
 			Database:  c.Database,
 			Requested: c.Requested,
 			PID:       c.PID,
@@ -80,11 +81,11 @@ func statusOf(conns []proxy.Conn) control.Status {
 }
 
 type statusRow struct {
-	repo, worktree, branch, database string
+	repo, worktree, branch, upstream, database string
 }
 
-// printStatus prints one line per repository, worktree, branch and database,
-// with how many connections share it.
+// printStatus prints one line per repository, worktree, branch, upstream and
+// database, with how many connections share it.
 func printStatus(w io.Writer, s control.Status) {
 	if len(s.Connections) == 0 {
 		fmt.Fprintln(w, "no connections")
@@ -104,20 +105,24 @@ func printStatus(w io.Writer, s control.Status) {
 		return cmp.Or(
 			cmp.Compare(a.repo, b.repo),
 			cmp.Compare(a.worktree, b.worktree),
+			cmp.Compare(a.upstream, b.upstream),
 			cmp.Compare(a.database, b.database),
 		)
 	})
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "REPO\tWORKTREE\tBRANCH\tDATABASE\tCONNS")
+	fmt.Fprintln(tw, "REPO\tWORKTREE\tBRANCH\tUPSTREAM\tDATABASE\tCONNS")
 	for _, r := range rows {
-		fmt.Fprintln(tw, strings.Join([]string{r.repo, r.worktree, r.branch, r.database, strconv.Itoa(counts[r])}, "\t"))
+		cells := []string{r.repo, r.worktree, r.branch, r.upstream, r.database, strconv.Itoa(counts[r])}
+		fmt.Fprintln(tw, strings.Join(cells, "\t"))
 	}
 	_ = tw.Flush() // status output: nothing useful to do with a write error
 }
 
 func rowOf(c control.Connection) statusRow {
-	r := statusRow{repo: c.Repo, worktree: shortenHome(c.Worktree), branch: c.Branch, database: c.Database}
+	r := statusRow{
+		repo: c.Repo, worktree: shortenHome(c.Worktree), branch: c.Branch, upstream: c.Upstream, database: c.Database,
+	}
 	switch {
 	case c.Worktree == "":
 		r.repo, r.worktree, r.branch = "-", "(no worktree)", "-"

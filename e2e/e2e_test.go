@@ -23,6 +23,7 @@ import (
 	"github.com/mickamy/pgswitch/internal/proxy"
 	"github.com/mickamy/pgswitch/internal/route"
 	"github.com/mickamy/pgswitch/internal/router"
+	"github.com/mickamy/pgswitch/internal/upstream"
 	"github.com/mickamy/pgswitch/internal/watch"
 )
 
@@ -152,7 +153,9 @@ func startProxy(t *testing.T, admin pgadmin.Config) string {
 		r.Switched(t.Context(), c.CommonDir, c.From, c.To)
 		p.Sever(c.Worktree, c.To)
 	})
-	r = router.New(logger, clone.New(pgclone.New(admin), logger), w)
+	cloner := clone.New(pgclone.New(admin), logger)
+	byDefault := upstream.Upstream{Addr: admin.Addr, AdminUser: admin.User, AdminPassword: admin.Password}
+	r = router.New(logger, byDefault, func(upstream.Upstream) router.Cloner { return cloner }, w)
 	p = proxy.New(admin.Addr, r, logger)
 	go w.Run(t.Context())
 	done := make(chan error, 1)

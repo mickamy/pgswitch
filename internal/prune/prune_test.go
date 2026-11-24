@@ -3,6 +3,8 @@ package prune_test
 import (
 	"cmp"
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -10,6 +12,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -21,16 +24,22 @@ import (
 
 const database = "shop_development"
 
+const (
+	shopUpstream = "127.0.0.1:5433"
+	blogUpstream = "127.0.0.1:5434"
+)
+
 type fakeAdmin struct {
 	labels  map[string]clone.Label
 	staging []string
+	err     error
 }
 
 var _ prune.Admin = fakeAdmin{}
 
-func (a fakeAdmin) Labels(context.Context) (map[string]clone.Label, error) { return a.labels, nil }
+func (a fakeAdmin) Labels(context.Context) (map[string]clone.Label, error) { return a.labels, a.err }
 
-func (a fakeAdmin) AbandonedStaging(context.Context) ([]string, error) { return a.staging, nil }
+func (a fakeAdmin) AbandonedStaging(context.Context) ([]string, error) { return a.staging, a.err }
 
 type fakeDropper struct {
 	mu      sync.Mutex
@@ -101,8 +110,12 @@ func branchDB(repo, branch string) (string, clone.Label) {
 	return route.PhysicalName(repo, database, branch, "main"), clone.Label{Repo: repo, Branch: branch, Database: database}
 }
 
-func newPruner(admin prune.Admin, dropper prune.Dropper) prune.Pruner {
-	return prune.New(slog.New(slog.DiscardHandler), admin, dropper)
+func newPruner(servers map[string]prune.Server) prune.Pruner {
+	return prune.New(slog.New(slog.DiscardHandler), func() map[string]prune.Server { return servers })
+}
+
+func onShop(admin prune.Admin, dropper prune.Dropper) prune.Pruner {
+	return newPruner(map[string]prune.Server{shopUpstream: {Admin: admin, Dropper: dropper}})
 }
 
 func TestCandidates(t *testing.T) {
@@ -131,14 +144,37 @@ func TestCandidates(t *testing.T) {
 		staging: []string{"pgswitch_staging_0123456789abcdef"},
 	}
 
-	got, err := newPruner(admin, &fakeDropper{}).Candidates(t.Context())
-	require.NoError(t, err)
+	got, skipped := onShop(admin, &fakeDropper{}).Candidates(t.Context())
 
+	assert.Empty(t, skipped)
 	assert.Equal(t, sorted(
-		prune.Candidate{Database: goneDB, Label: goneLabel, Reason: prune.BranchGone},
-		prune.Candidate{Database: removedDB, Label: removedLabel, Reason: prune.RepoGone},
-		prune.Candidate{Database: "pgswitch_staging_0123456789abcdef", Reason: prune.Leftover},
+		prune.Candidate{Upstream: shopUpstream, Database: goneDB, Label: goneLabel, Reason: prune.BranchGone},
+		prune.Candidate{Upstream: shopUpstream, Database: removedDB, Label: removedLabel, Reason: prune.RepoGone},
+		prune.Candidate{Upstream: shopUpstream, Database: "pgswitch_staging_0123456789abcdef", Reason: prune.Leftover},
 	), got)
+}
+
+func TestCandidatesOnEveryUpstream(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t)
+	shopDB, shopLabel := branchDB(repo, "gone")
+	stopped := errors.New("dial tcp 127.0.0.1:5435: connect: connection refused")
+	p := newPruner(map[string]prune.Server{
+		blogUpstream:     {Admin: fakeAdmin{staging: []string{"pgswitch_staging_0123456789abcdef"}}},
+		shopUpstream:     {Admin: fakeAdmin{labels: map[string]clone.Label{shopDB: shopLabel}}},
+		"127.0.0.1:5435": {Admin: fakeAdmin{err: stopped}},
+	})
+
+	got, skipped := p.Candidates(t.Context())
+
+	assert.Equal(t, []prune.Candidate{
+		{Upstream: shopUpstream, Database: shopDB, Label: shopLabel, Reason: prune.BranchGone},
+		{Upstream: blogUpstream, Database: "pgswitch_staging_0123456789abcdef", Reason: prune.Leftover},
+	}, got, "by upstream, then by database")
+	require.Len(t, skipped, 1)
+	assert.Equal(t, "127.0.0.1:5435", skipped[0].Upstream)
+	assert.ErrorIs(t, skipped[0].Err, stopped, "a stopped container does not keep prune from the others")
 }
 
 func TestDrop(t *testing.T) {
@@ -156,16 +192,36 @@ func TestDrop(t *testing.T) {
 	}
 	dropper := &fakeDropper{inUse: map[string]bool{busyDB: true}}
 
-	got, err := newPruner(admin, dropper).Drop(t.Context(), []string{goneDB, keptDB, busyDB, staging})
-	require.NoError(t, err)
+	got := onShop(admin, dropper).Drop(t.Context(), []prune.Target{
+		{Upstream: shopUpstream, Database: goneDB},
+		{Upstream: shopUpstream, Database: keptDB},
+		{Upstream: shopUpstream, Database: busyDB},
+		{Upstream: shopUpstream, Database: staging},
+		{Upstream: blogUpstream, Database: goneDB},
+	})
 
 	assert.Equal(t, []prune.Outcome{
-		{Database: goneDB, Dropped: true},
-		{Database: keptDB, Kept: "no longer a candidate"},
-		{Database: busyDB, Kept: "in use"},
-		{Database: staging, Dropped: true},
+		{Upstream: shopUpstream, Database: goneDB, Dropped: true},
+		{Upstream: shopUpstream, Database: keptDB, Kept: "no longer a candidate"},
+		{Upstream: shopUpstream, Database: busyDB, Kept: "in use"},
+		{Upstream: shopUpstream, Database: staging, Dropped: true},
+		{Upstream: blogUpstream, Database: goneDB, Kept: "unknown upstream"},
 	}, got)
 	assert.Equal(t, []string{goneDB, staging}, dropper.dropped)
+}
+
+func TestDropKeepsWhatIsOnAnUnreachableUpstream(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t)
+	db, _ := branchDB(repo, "gone")
+	dropper := &fakeDropper{}
+	p := onShop(fakeAdmin{err: errors.New("connection refused")}, dropper)
+
+	got := p.Drop(t.Context(), []prune.Target{{Upstream: shopUpstream, Database: db}})
+
+	assert.Equal(t, []prune.Outcome{{Upstream: shopUpstream, Database: db, Kept: "prune: connection refused"}}, got)
+	assert.Empty(t, dropper.dropped)
 }
 
 // TestDropJudgesAgain recreates the branch after the candidates were listed.
@@ -176,11 +232,10 @@ func TestDropJudgesAgain(t *testing.T) {
 	db, label := branchDB(repo, "fix-tax")
 	dropper := &fakeDropper{beforeCheck: func() { runGit(t, filepath.Dir(repo), "branch", "fix-tax") }}
 
-	got, err := newPruner(fakeAdmin{labels: map[string]clone.Label{db: label}}, dropper).
-		Drop(t.Context(), []string{db})
-	require.NoError(t, err)
+	got := onShop(fakeAdmin{labels: map[string]clone.Label{db: label}}, dropper).
+		Drop(t.Context(), []prune.Target{{Upstream: shopUpstream, Database: db}})
 
-	assert.Equal(t, []prune.Outcome{{Database: db, Kept: "no longer a candidate"}}, got)
+	assert.Equal(t, []prune.Outcome{{Upstream: shopUpstream, Database: db, Kept: "no longer a candidate"}}, got)
 	assert.Empty(t, dropper.dropped)
 }
 
@@ -188,4 +243,86 @@ func sorted(cs ...prune.Candidate) []prune.Candidate {
 	slices.SortFunc(cs, func(a, b prune.Candidate) int { return cmp.Compare(a.Database, b.Database) })
 
 	return cs
+}
+
+// within fails the test unless fn returns in a few seconds.
+func within(t *testing.T, fn func()) {
+	t.Helper()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		require.FailNow(t, "still waiting on a stuck upstream")
+	}
+}
+
+// stuckAdmin is a server that accepts connections and never answers.
+type stuckAdmin struct{}
+
+func (stuckAdmin) Labels(ctx context.Context) (map[string]clone.Label, error) {
+	<-ctx.Done()
+
+	return nil, fmt.Errorf("stuck: %w", ctx.Err())
+}
+
+func (stuckAdmin) AbandonedStaging(ctx context.Context) ([]string, error) {
+	<-ctx.Done()
+
+	return nil, fmt.Errorf("stuck: %w", ctx.Err())
+}
+
+func TestCandidatesDoNotWaitOnAStuckUpstream(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t)
+	db, label := branchDB(repo, "gone")
+	p := prune.WithTimeout(newPruner(map[string]prune.Server{
+		"127.0.0.1:5431": {Admin: stuckAdmin{}},
+		"127.0.0.1:5432": {Admin: stuckAdmin{}},
+		shopUpstream:     {Admin: fakeAdmin{labels: map[string]clone.Label{db: label}}},
+	}), 50*time.Millisecond)
+
+	start := time.Now()
+	var got []prune.Candidate
+	var skipped []prune.Skipped
+	within(t, func() { got, skipped = p.Candidates(t.Context()) })
+
+	assert.Less(t, time.Since(start), time.Second, "the stuck upstreams are waited on together")
+	assert.Equal(t, []prune.Candidate{
+		{Upstream: shopUpstream, Database: db, Label: label, Reason: prune.BranchGone},
+	}, got)
+	require.Len(t, skipped, 2)
+	for _, s := range skipped {
+		assert.ErrorIs(t, s.Err, context.DeadlineExceeded, s.Upstream)
+	}
+}
+
+func TestDropDoesNotWaitOnAStuckUpstream(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t)
+	db, label := branchDB(repo, "gone")
+	dropper := &fakeDropper{}
+	p := prune.WithTimeout(newPruner(map[string]prune.Server{
+		"127.0.0.1:5431": {Admin: stuckAdmin{}},
+		shopUpstream:     {Admin: fakeAdmin{labels: map[string]clone.Label{db: label}}, Dropper: dropper},
+	}), 50*time.Millisecond)
+
+	var got []prune.Outcome
+	within(t, func() {
+		got = p.Drop(t.Context(), []prune.Target{
+			{Upstream: "127.0.0.1:5431", Database: db},
+			{Upstream: shopUpstream, Database: db},
+		})
+	})
+
+	require.Len(t, got, 2)
+	assert.False(t, got[0].Dropped)
+	assert.Contains(t, got[0].Kept, context.DeadlineExceeded.Error())
+	assert.Equal(t, prune.Outcome{Upstream: shopUpstream, Database: db, Dropped: true}, got[1])
 }
