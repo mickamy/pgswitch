@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"slices"
 
@@ -26,23 +27,39 @@ const (
 
 // Candidate is a database prune would drop.
 type Candidate struct {
+	Upstream string
 	Database string
 	// Label is zero for a leftover staging database.
 	Label  clone.Label
 	Reason Reason
 }
 
+// Target names a database to drop.
+type Target struct {
+	Upstream string
+	Database string
+}
+
 // Outcome is what became of a database asked to be dropped.
 type Outcome struct {
+	Upstream string
 	Database string
 	Dropped  bool
 	// Kept says why it was left in place.
 	Kept string
 }
 
+// Skipped is an upstream prune could not look at, such as a stopped
+// container.
+type Skipped struct {
+	Upstream string
+	Err      error
+}
+
 const (
-	keptInUse        = "in use"
-	keptNotCandidate = "no longer a candidate"
+	keptInUse           = "in use"
+	keptNotCandidate    = "no longer a candidate"
+	keptUnknownUpstream = "unknown upstream"
 )
 
 // Admin lists what pgswitch left on the server.
@@ -57,26 +74,101 @@ type Dropper interface {
 	Drop(ctx context.Context, db string, check func(context.Context) (bool, error)) (bool, error)
 }
 
-// Pruner finds the databases whose branch or repository is gone and drops
-// them.
+// Server is an upstream as prune sees it.
+type Server struct {
+	Admin   Admin
+	Dropper Dropper
+}
+
+// Pruner finds the databases whose branch or repository is gone, on every
+// upstream it knows, and drops them.
 type Pruner struct {
 	logger  *slog.Logger
-	admin   Admin
-	dropper Dropper
+	servers func() map[string]Server
 }
 
-func New(logger *slog.Logger, admin Admin, dropper Dropper) Pruner {
-	return Pruner{logger: logger, admin: admin, dropper: dropper}
+// New returns a pruner that looks at the servers, by address, servers returns
+// at the time.
+func New(logger *slog.Logger, servers func() map[string]Server) Pruner {
+	return Pruner{logger: logger, servers: servers}
 }
 
-// Candidates lists the databases to drop, by name. A database it cannot judge
-// is left out.
-func (p Pruner) Candidates(ctx context.Context) ([]Candidate, error) {
-	labels, err := p.admin.Labels(ctx)
+// Candidates lists the databases to drop, by upstream and name, and the
+// upstreams it could not look at. A database it cannot judge is left out.
+func (p Pruner) Candidates(ctx context.Context) ([]Candidate, []Skipped) {
+	servers := p.servers()
+
+	var candidates []Candidate
+	var skipped []Skipped
+	for _, addr := range slices.Sorted(maps.Keys(servers)) {
+		on, err := p.candidatesOn(ctx, addr, servers[addr])
+		if err != nil {
+			p.logger.Warn("prune: skipped an upstream", "upstream", addr, "err", err)
+			skipped = append(skipped, Skipped{Upstream: addr, Err: err})
+
+			continue
+		}
+		candidates = append(candidates, on...)
+	}
+
+	return candidates, skipped
+}
+
+// Drop drops those of targets that are still candidates, judging each again
+// just before it goes. A database with sessions is left in place, and so is
+// one on an upstream it cannot reach.
+func (p Pruner) Drop(ctx context.Context, targets []Target) []Outcome {
+	servers := p.servers()
+	// Each upstream's candidates, picked afresh once.
+	candidates := make(map[string]map[string]Candidate)
+	failed := make(map[string]error)
+
+	outcomes := make([]Outcome, 0, len(targets))
+	for _, t := range targets {
+		kept := Outcome{Upstream: t.Upstream, Database: t.Database}
+		srv, ok := servers[t.Upstream]
+		if !ok {
+			kept.Kept = keptUnknownUpstream
+			outcomes = append(outcomes, kept)
+
+			continue
+		}
+		if _, picked := candidates[t.Upstream]; !picked && failed[t.Upstream] == nil {
+			on, err := p.candidatesOn(ctx, t.Upstream, srv)
+			if err != nil {
+				failed[t.Upstream] = err
+			} else {
+				candidates[t.Upstream] = make(map[string]Candidate, len(on))
+				for _, c := range on {
+					candidates[t.Upstream][c.Database] = c
+				}
+			}
+		}
+		if err := failed[t.Upstream]; err != nil {
+			kept.Kept = err.Error()
+			outcomes = append(outcomes, kept)
+
+			continue
+		}
+		c, ok := candidates[t.Upstream][t.Database]
+		if !ok {
+			kept.Kept = keptNotCandidate
+			outcomes = append(outcomes, kept)
+
+			continue
+		}
+		outcomes = append(outcomes, p.drop(ctx, srv.Dropper, c))
+	}
+
+	return outcomes
+}
+
+func (p Pruner) candidatesOn(ctx context.Context, addr string, srv Server) ([]Candidate, error) {
+	labels, err := srv.Admin.Labels(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("prune: %w", err)
 	}
-	staging, err := p.admin.AbandonedStaging(ctx)
+	staging, err := srv.Admin.AbandonedStaging(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("prune: %w", err)
 	}
@@ -85,50 +177,24 @@ func (p Pruner) Candidates(ctx context.Context) ([]Candidate, error) {
 	for db, label := range labels {
 		reason, ok, err := judge(db, label)
 		if err != nil {
-			p.logger.Warn("prune: cannot tell whether the branch is gone", "database", db, "err", err)
+			p.logger.Warn("prune: cannot tell whether the branch is gone", "upstream", addr, "database", db, "err", err)
 
 			continue
 		}
 		if ok {
-			candidates = append(candidates, Candidate{Database: db, Label: label, Reason: reason})
+			candidates = append(candidates, Candidate{Upstream: addr, Database: db, Label: label, Reason: reason})
 		}
 	}
 	for _, db := range staging {
-		candidates = append(candidates, Candidate{Database: db, Reason: Leftover})
+		candidates = append(candidates, Candidate{Upstream: addr, Database: db, Reason: Leftover})
 	}
 	slices.SortFunc(candidates, func(a, b Candidate) int { return cmp.Compare(a.Database, b.Database) })
 
 	return candidates, nil
 }
 
-// Drop drops those of databases that are still candidates, judging each again
-// just before it goes. A database with sessions is left in place.
-func (p Pruner) Drop(ctx context.Context, databases []string) ([]Outcome, error) {
-	candidates, err := p.Candidates(ctx)
-	if err != nil {
-		return nil, err
-	}
-	byName := make(map[string]Candidate, len(candidates))
-	for _, c := range candidates {
-		byName[c.Database] = c
-	}
-
-	outcomes := make([]Outcome, 0, len(databases))
-	for _, db := range databases {
-		c, ok := byName[db]
-		if !ok {
-			outcomes = append(outcomes, Outcome{Database: db, Kept: keptNotCandidate})
-
-			continue
-		}
-		outcomes = append(outcomes, p.drop(ctx, c))
-	}
-
-	return outcomes, nil
-}
-
-func (p Pruner) drop(ctx context.Context, c Candidate) Outcome {
-	dropped, err := p.dropper.Drop(ctx, c.Database, func(context.Context) (bool, error) {
+func (p Pruner) drop(ctx context.Context, dropper Dropper, c Candidate) Outcome {
+	dropped, err := dropper.Drop(ctx, c.Database, func(context.Context) (bool, error) {
 		if c.Reason == Leftover {
 			return true, nil
 		}
@@ -138,15 +204,15 @@ func (p Pruner) drop(ctx context.Context, c Candidate) Outcome {
 	})
 	switch {
 	case errors.Is(err, clone.ErrInUse):
-		return Outcome{Database: c.Database, Kept: keptInUse}
+		return Outcome{Upstream: c.Upstream, Database: c.Database, Kept: keptInUse}
 	case err != nil:
-		return Outcome{Database: c.Database, Kept: err.Error()}
+		return Outcome{Upstream: c.Upstream, Database: c.Database, Kept: err.Error()}
 	case !dropped:
-		return Outcome{Database: c.Database, Kept: keptNotCandidate}
+		return Outcome{Upstream: c.Upstream, Database: c.Database, Kept: keptNotCandidate}
 	default:
-		p.logger.Info("dropped", "database", c.Database, "reason", string(c.Reason))
+		p.logger.Info("dropped", "upstream", c.Upstream, "database", c.Database, "reason", string(c.Reason))
 
-		return Outcome{Database: c.Database, Dropped: true}
+		return Outcome{Upstream: c.Upstream, Database: c.Database, Dropped: true}
 	}
 }
 

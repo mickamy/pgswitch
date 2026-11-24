@@ -48,6 +48,7 @@ type Status struct {
 
 // PruneCandidate is a database prune would drop.
 type PruneCandidate struct {
+	Upstream string `json:"upstream"`
 	Database string `json:"database"`
 	// Repo, Branch and Requested are empty for a leftover staging database.
 	Repo      string `json:"repo,omitempty"`
@@ -56,8 +57,28 @@ type PruneCandidate struct {
 	Reason    string `json:"reason"`
 }
 
+// PruneSkipped is an upstream prune could not look at.
+type PruneSkipped struct {
+	Upstream string `json:"upstream"`
+	Error    string `json:"error"`
+}
+
+// PruneListing is what prune would drop, and the upstreams it could not look
+// at.
+type PruneListing struct {
+	Candidates []PruneCandidate `json:"candidates"`
+	Skipped    []PruneSkipped   `json:"skipped,omitempty"`
+}
+
+// PruneTarget names a database for prune to drop.
+type PruneTarget struct {
+	Upstream string `json:"upstream"`
+	Database string `json:"database"`
+}
+
 // PruneOutcome is what became of a database prune was asked to drop.
 type PruneOutcome struct {
+	Upstream string `json:"upstream"`
 	Database string `json:"database"`
 	Dropped  bool   `json:"dropped"`
 	Kept     string `json:"kept,omitempty"`
@@ -65,16 +86,12 @@ type PruneOutcome struct {
 
 // Pruner is how serve prunes.
 type Pruner interface {
-	Candidates(ctx context.Context) ([]PruneCandidate, error)
-	Drop(ctx context.Context, databases []string) ([]PruneOutcome, error)
-}
-
-type pruneCandidates struct {
-	Candidates []PruneCandidate `json:"candidates"`
+	Candidates(ctx context.Context) (PruneListing, error)
+	Drop(ctx context.Context, targets []PruneTarget) ([]PruneOutcome, error)
 }
 
 type pruneRequest struct {
-	Databases []string `json:"databases"`
+	Targets []PruneTarget `json:"targets"`
 }
 
 type pruneOutcomes struct {
@@ -178,13 +195,13 @@ func Serve(ctx context.Context, ln net.Listener, src Source) error {
 		serveLog(ctx.Done(), w, r, src.Events)
 	})
 	mux.HandleFunc("GET "+prunePath, func(w http.ResponseWriter, r *http.Request) {
-		candidates, err := src.Pruner.Candidates(r.Context())
+		listing, err := src.Pruner.Candidates(r.Context())
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 
 			return
 		}
-		writeJSON(w, pruneCandidates{Candidates: candidates})
+		writeJSON(w, listing)
 	})
 	mux.HandleFunc("POST "+prunePath, func(w http.ResponseWriter, r *http.Request) {
 		var req pruneRequest
@@ -193,7 +210,7 @@ func Serve(ctx context.Context, ln net.Listener, src Source) error {
 
 			return
 		}
-		outcomes, err := src.Pruner.Drop(r.Context(), req.Databases)
+		outcomes, err := src.Pruner.Drop(r.Context(), req.Targets)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 
@@ -336,19 +353,19 @@ func (c Client) Log(ctx context.Context, follow bool, fn func(events.Event)) err
 }
 
 // PruneCandidates lists the databases serve would prune.
-func (c Client) PruneCandidates(ctx context.Context) ([]PruneCandidate, error) {
-	var res pruneCandidates
+func (c Client) PruneCandidates(ctx context.Context) (PruneListing, error) {
+	var res PruneListing
 	if err := c.call(ctx, http.MethodGet, nil, &res); err != nil {
-		return nil, err
+		return PruneListing{}, err
 	}
 
-	return res.Candidates, nil
+	return res, nil
 }
 
-// Prune asks serve to drop databases, those that are still candidates.
-func (c Client) Prune(ctx context.Context, databases []string) ([]PruneOutcome, error) {
+// Prune asks serve to drop targets, those that are still candidates.
+func (c Client) Prune(ctx context.Context, targets []PruneTarget) ([]PruneOutcome, error) {
 	var res pruneOutcomes
-	if err := c.call(ctx, http.MethodPost, pruneRequest{Databases: databases}, &res); err != nil {
+	if err := c.call(ctx, http.MethodPost, pruneRequest{Targets: targets}, &res); err != nil {
 		return nil, err
 	}
 

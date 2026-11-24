@@ -43,11 +43,13 @@ func TestPruneDropsTheDatabaseOfADeletedBranch(t *testing.T) { //nolint:parallel
 
 	logger := slog.New(slog.DiscardHandler)
 	a := pgclone.New(cfg)
-	pruner := prune.New(logger, a, clone.New(a, logger))
+	server := prune.Server{Admin: a, Dropper: clone.New(a, logger)}
+	pruner := prune.New(logger, func() map[string]prune.Server { return map[string]prune.Server{cfg.Addr: server} })
 
-	candidates, err := pruner.Candidates(t.Context())
-	require.NoError(t, err)
+	candidates, skipped := pruner.Candidates(t.Context())
+	require.Empty(t, skipped)
 	assert.NotContains(t, candidates, prune.Candidate{
+		Upstream: cfg.Addr,
 		Database: branchDB,
 		Label:    clone.Label{Repo: filepath.Join(repo, ".git"), Branch: "fix-tax", Database: db},
 		Reason:   prune.BranchGone,
@@ -55,9 +57,10 @@ func TestPruneDropsTheDatabaseOfADeletedBranch(t *testing.T) { //nolint:parallel
 
 	runGit(t, repo, "switch", "-q", "main")
 	runGit(t, repo, "branch", "-q", "-D", "fix-tax")
-	candidates, err = pruner.Candidates(t.Context())
-	require.NoError(t, err)
+	candidates, skipped = pruner.Candidates(t.Context())
+	require.Empty(t, skipped)
 	assert.Contains(t, candidates, prune.Candidate{
+		Upstream: cfg.Addr,
 		Database: branchDB,
 		Label:    clone.Label{Repo: filepath.Join(repo, ".git"), Branch: "fix-tax", Database: db},
 		Reason:   prune.BranchGone,
@@ -66,19 +69,18 @@ func TestPruneDropsTheDatabaseOfADeletedBranch(t *testing.T) { //nolint:parallel
 	onBranchDB := cfg
 	onBranchDB.Database = branchDB
 	session := connect(t, onBranchDB)
-	outcomes, err := pruner.Drop(t.Context(), []string{branchDB, db})
-	require.NoError(t, err)
+	outcomes := pruner.Drop(t.Context(), []prune.Target{
+		{Upstream: cfg.Addr, Database: branchDB},
+		{Upstream: cfg.Addr, Database: db},
+	})
 	assert.Equal(t, []prune.Outcome{
-		{Database: branchDB, Kept: "in use"},
-		{Database: db, Kept: "no longer a candidate"},
+		{Upstream: cfg.Addr, Database: branchDB, Kept: "in use"},
+		{Upstream: cfg.Addr, Database: db, Kept: "no longer a candidate"},
 	}, outcomes, "a database with a session and the default branch's are kept")
 
 	require.NoError(t, session.Close())
 	require.Eventually(t, func() bool {
-		outcomes, err := pruner.Drop(t.Context(), []string{branchDB})
-		require.NoError(t, err)
-
-		return outcomes[0].Dropped
+		return pruner.Drop(t.Context(), []prune.Target{{Upstream: cfg.Addr, Database: branchDB}})[0].Dropped
 	}, 5*time.Second, 50*time.Millisecond)
 	exists, err := a.Exists(t.Context(), branchDB)
 	require.NoError(t, err)

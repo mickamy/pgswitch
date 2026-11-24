@@ -289,25 +289,25 @@ func TestLogFollow(t *testing.T) { //nolint:paralleltest // t.Chdir changes the 
 }
 
 type fakePruner struct {
-	candidates []control.PruneCandidate
-	asked      []string
-	err        error
+	listing control.PruneListing
+	asked   []control.PruneTarget
+	err     error
 }
 
 var _ control.Pruner = (*fakePruner)(nil)
 
-func (p *fakePruner) Candidates(context.Context) ([]control.PruneCandidate, error) {
-	return p.candidates, p.err
+func (p *fakePruner) Candidates(context.Context) (control.PruneListing, error) {
+	return p.listing, p.err
 }
 
-func (p *fakePruner) Drop(_ context.Context, databases []string) ([]control.PruneOutcome, error) {
-	p.asked = databases
+func (p *fakePruner) Drop(_ context.Context, targets []control.PruneTarget) ([]control.PruneOutcome, error) {
+	p.asked = targets
 	if p.err != nil {
 		return nil, p.err
 	}
-	outcomes := make([]control.PruneOutcome, len(databases))
-	for i, db := range databases {
-		outcomes[i] = control.PruneOutcome{Database: db, Dropped: true}
+	outcomes := make([]control.PruneOutcome, len(targets))
+	for i, t := range targets {
+		outcomes[i] = control.PruneOutcome{Upstream: t.Upstream, Database: t.Database, Dropped: true}
 	}
 
 	return outcomes, nil
@@ -325,12 +325,17 @@ func servePruner(t *testing.T, p control.Pruner) {
 
 func TestPrune(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
 	t.Chdir(t.TempDir())
-	want := []control.PruneCandidate{
-		{Database: "shop_test__fix_tax_708dc013", Repo: "/src/shop/.git", Branch: "fix-tax", Requested: "shop_test",
-			Reason: "branch gone"},
-		{Database: "pgswitch_staging_0123456789abcdef", Reason: "leftover staging"},
+	want := control.PruneListing{
+		Candidates: []control.PruneCandidate{
+			{
+				Upstream: "127.0.0.1:5433", Database: "shop_test__fix_tax_708dc013",
+				Repo: "/src/shop/.git", Branch: "fix-tax", Requested: "shop_test", Reason: "branch gone",
+			},
+			{Upstream: "127.0.0.1:5432", Database: "pgswitch_staging_0123456789abcdef", Reason: "leftover staging"},
+		},
+		Skipped: []control.PruneSkipped{{Upstream: "127.0.0.1:5434", Error: "connection refused"}},
 	}
-	p := &fakePruner{candidates: want}
+	p := &fakePruner{listing: want}
 	servePruner(t, p)
 	client := control.NewClient(socket)
 
@@ -338,10 +343,13 @@ func TestPrune(t *testing.T) { //nolint:paralleltest // t.Chdir changes the proc
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
 
-	outcomes, err := client.Prune(t.Context(), []string{"shop_test__fix_tax_708dc013"})
+	target := control.PruneTarget{Upstream: "127.0.0.1:5433", Database: "shop_test__fix_tax_708dc013"}
+	outcomes, err := client.Prune(t.Context(), []control.PruneTarget{target})
 	require.NoError(t, err)
-	assert.Equal(t, []control.PruneOutcome{{Database: "shop_test__fix_tax_708dc013", Dropped: true}}, outcomes)
-	assert.Equal(t, []string{"shop_test__fix_tax_708dc013"}, p.asked)
+	assert.Equal(t, []control.PruneOutcome{
+		{Upstream: "127.0.0.1:5433", Database: "shop_test__fix_tax_708dc013", Dropped: true},
+	}, outcomes)
+	assert.Equal(t, []control.PruneTarget{target}, p.asked)
 }
 
 func TestPruneReportsServeErrors(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
@@ -351,6 +359,6 @@ func TestPruneReportsServeErrors(t *testing.T) { //nolint:paralleltest // t.Chdi
 
 	_, err := client.PruneCandidates(t.Context())
 	require.ErrorContains(t, err, "pgclone: connection refused")
-	_, err = client.Prune(t.Context(), []string{"shop_test__fix_tax_708dc013"})
+	_, err = client.Prune(t.Context(), []control.PruneTarget{{Upstream: "127.0.0.1:5432", Database: "x"}})
 	require.ErrorContains(t, err, "pgclone: connection refused")
 }

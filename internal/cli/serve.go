@@ -81,6 +81,7 @@ func runServe(ctx context.Context, args []string, std IO) int {
 		r.Switched(ctx, c.CommonDir, c.From, c.To)
 		p.Sever(c.Worktree, c.To)
 	})
+	servers.Get(byDefault) // known to prune from the start
 	r = router.New(logger, byDefault, func(u upstream.Upstream) router.Cloner { return servers.Get(u).cloner }, w)
 	p = proxy.New(*upstreamAddr, r, logger)
 	go w.Run(ctx)
@@ -89,7 +90,14 @@ func runServe(ctx context.Context, args []string, std IO) int {
 		src := control.Source{
 			Status: func() control.Status { return statusOf(p.Conns()) },
 			Events: recent,
-			Pruner: pruneSource{p: prune.New(logger, servers.Get(byDefault).admin, servers.Get(byDefault).cloner)},
+			Pruner: pruneSource{p: prune.New(logger, func() map[string]prune.Server {
+				out := make(map[string]prune.Server)
+				for addr, s := range servers.ByAddr() {
+					out[addr] = prune.Server{Admin: s.admin, Dropper: s.cloner}
+				}
+
+				return out
+			})},
 		}
 		stopped, err := serveControl(ctx, *controlPath, src, logger)
 		if err != nil {
