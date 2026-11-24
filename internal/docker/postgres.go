@@ -10,10 +10,12 @@ import (
 	"strings"
 )
 
+// WorkingDirLabel is where Compose records the directory it ran in.
+const WorkingDirLabel = "com.docker.compose.project.working_dir"
+
 const (
-	workingDirLabel = "com.docker.compose.project.working_dir"
-	postgresPort    = 5432
-	defaultUser     = "postgres"
+	postgresPort = 5432
+	defaultUser  = "postgres"
 )
 
 var ErrAmbiguous = errors.New("docker: several Postgres containers")
@@ -38,7 +40,7 @@ func (c Client) FindPostgres(ctx context.Context, roots []string) (pg Postgres, 
 
 	var found []Postgres
 	for _, ct := range containers {
-		if !ct.Running || !insideAny(ct.Labels[workingDirLabel], roots) {
+		if !ct.Running || !insideAny(ct.Labels[WorkingDirLabel], roots) {
 			continue
 		}
 		addr, published := publishedPostgres(ct.Ports)

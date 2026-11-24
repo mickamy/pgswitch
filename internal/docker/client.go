@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -20,9 +21,10 @@ const (
 var ErrNotFound = errors.New("docker: no such container")
 
 // Container is what pgswitch reads of a container. Containers fills Ports;
-// Inspect fills Env.
+// Inspect fills Name and Env.
 type Container struct {
 	ID      string
+	Name    string
 	Running bool
 	Labels  map[string]string
 	Ports   []Port
@@ -77,6 +79,7 @@ func (c Client) Containers(ctx context.Context) ([]Container, error) {
 func (c Client) Inspect(ctx context.Context, id string) (Container, error) {
 	var inspected struct {
 		ID    string
+		Name  string
 		State struct {
 			Running bool
 		}
@@ -91,6 +94,7 @@ func (c Client) Inspect(ctx context.Context, id string) (Container, error) {
 
 	return Container{
 		ID:      inspected.ID,
+		Name:    strings.TrimPrefix(inspected.Name, "/"),
 		Running: inspected.State.Running,
 		Labels:  inspected.Config.Labels,
 		Env:     inspected.Config.Env,

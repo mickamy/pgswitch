@@ -126,7 +126,7 @@ func (p Proxy) handle(ctx context.Context, client net.Conn) {
 
 			return
 		}
-		ctx = withContainer(ctx, id)
+		ctx = WithContainer(ctx, id)
 		logger = logger.With("container", id)
 		if pkt, err = negotiate(client); err != nil {
 			logNegotiationError(logger, err)

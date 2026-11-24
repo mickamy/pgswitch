@@ -69,6 +69,7 @@ func TestInspect(t *testing.T) { //nolint:paralleltest // t.Chdir changes the pr
 	t.Chdir(t.TempDir())
 	serveAPI(t, map[string]string{"/containers/4d51f0679caa/json": `{
 		"Id":"4d51f0679caac4604066da7a70b0ce138a41fa042d19835f55d292a92883159a",
+		"Name":"/shop-web-1",
 		"State":{"Status":"running","Running":true},
 		"Config":{"Hostname":"4d51f0679caa","Env":["POSTGRES_PASSWORD=postgres","PGDATA=/var/lib/postgresql/data"],
 		          "Labels":{"com.docker.compose.project.working_dir":"/src/shop"}}
@@ -79,6 +80,7 @@ func TestInspect(t *testing.T) { //nolint:paralleltest // t.Chdir changes the pr
 	require.NoError(t, err)
 	assert.Equal(t, docker.Container{
 		ID:      "4d51f0679caac4604066da7a70b0ce138a41fa042d19835f55d292a92883159a",
+		Name:    "shop-web-1",
 		Running: true,
 		Labels:  map[string]string{"com.docker.compose.project.working_dir": "/src/shop"},
 		Env:     []string{"POSTGRES_PASSWORD=postgres", "PGDATA=/var/lib/postgresql/data"},

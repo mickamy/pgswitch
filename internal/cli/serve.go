@@ -181,7 +181,7 @@ func serveControl(ctx context.Context, path string, src control.Source, logger *
 
 // dockerFinder finds repositories' Postgres through Docker, or is nil when
 // there is no Docker to ask.
-func dockerFinder(logger *slog.Logger) router.PostgresFinder {
+func dockerFinder(logger *slog.Logger) router.Docker {
 	home, _ := os.UserHomeDir()
 	socket, err := docker.Socket(docker.Env{Home: home, Getenv: os.Getenv})
 	if err != nil {

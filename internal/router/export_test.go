@@ -26,14 +26,15 @@ func NewWithCloners(logger *slog.Logger, cloners func(upstream.Upstream) Cloner,
 
 // NewWithPostgres returns a router that clones through cloners and finds
 // repositories' Postgres through postgres.
-func NewWithPostgres(logger *slog.Logger, cloners func(upstream.Upstream) Cloner, postgres PostgresFinder,
+func NewWithPostgres(logger *slog.Logger, cloners func(upstream.Upstream) Cloner, dockerAPI Docker,
 	watcher Watcher, lookup lookupFunc,
 ) Router {
 	return Router{
 		logger:    logger,
 		byDefault: DefaultUpstream,
 		cloners:   cloners,
-		postgres:  newPostgresCache(logger, postgres),
+		docker:    dockerAPI,
+		postgres:  newPostgresCache(logger, dockerAPI),
 		watcher:   watcher,
 		lookup:    lookup,
 		switches:  newSwitches(),
