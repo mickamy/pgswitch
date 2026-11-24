@@ -99,7 +99,17 @@ func runServiceInstall(ctx context.Context, args []string, std IO) int {
 	if err != nil {
 		return fail(std, err)
 	}
+	// Resolved here and handed to serve: the service manager's environment,
+	// XDG_STATE_HOME included, need not be this shell's.
 	logFile, err := services.logFile()
+	if err != nil {
+		return fail(std, err)
+	}
+	socket, err := services.socket()
+	if err != nil {
+		return fail(std, err)
+	}
+	passwordFile, err := services.passwordFile()
 	if err != nil {
 		return fail(std, err)
 	}
@@ -109,17 +119,16 @@ func runServiceInstall(ctx context.Context, args []string, std IO) int {
 	}
 
 	if password := os.Getenv("PGPASSWORD"); password != "" {
-		path, err := services.passwordFile()
-		if err != nil {
+		if err := writePassword(passwordFile, password); err != nil {
 			return fail(std, err)
 		}
-		if err := writePassword(path, password); err != nil {
-			return fail(std, err)
-		}
-		fmt.Fprintf(std.Out, "  kept the admin password from PGPASSWORD in %s\n", path)
+		fmt.Fprintf(std.Out, "  kept the admin password from PGPASSWORD in %s\n", passwordFile)
 	}
 
-	serveArgs := []string{"serve", "-listen", *listen, "-upstream", *upstreamAddr, "-admin-user", *adminUser}
+	serveArgs := []string{
+		"serve", "-listen", *listen, "-upstream", *upstreamAddr, "-admin-user", *adminUser,
+		"-control", socket, "-password-file", passwordFile,
+	}
 	if *debug {
 		serveArgs = append(serveArgs, "-debug")
 	}
@@ -127,7 +136,7 @@ func runServiceInstall(ctx context.Context, args []string, std IO) int {
 		return fail(std, err)
 	}
 
-	if err := waitForServe(ctx); err != nil {
+	if err := waitForServe(ctx, socket); err != nil {
 		return fail(std, fmt.Errorf("%w; %s", err, whereLogsAre(logFile)))
 	}
 	fmt.Fprintf(std.Out, "✔ pgswitch is running on %s, forwarding to %s\n", *listen, *upstreamAddr)
@@ -163,12 +172,8 @@ func runServiceUninstall(ctx context.Context, args []string, std IO) int {
 	return exit.OK
 }
 
-// waitForServe waits until a serve answers on the control socket.
-func waitForServe(ctx context.Context) error {
-	socket, err := services.socket()
-	if err != nil {
-		return err
-	}
+// waitForServe waits until a serve answers on socket.
+func waitForServe(ctx context.Context, socket string) error {
 	ctx, cancel := context.WithTimeout(ctx, services.startTimeout)
 	defer cancel()
 

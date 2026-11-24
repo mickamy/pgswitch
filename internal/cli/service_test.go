@@ -61,10 +61,11 @@ func TestServiceInstall(t *testing.T) {
 	assert.Equal(t, []service.Spec{{
 		Binary: binary,
 		Args: []string{
-			"serve", "-listen", "127.0.0.1:6432", "-upstream", "127.0.0.1:5433", "-admin-user", "postgres", "-debug",
+			"serve", "-listen", "127.0.0.1:6432", "-upstream", "127.0.0.1:5433", "-admin-user", "postgres",
+			"-control", "pgswitch.sock", "-password-file", "admin-password", "-debug",
 		},
 		LogPath: "pgswitch.log",
-	}}, m.installed)
+	}}, m.installed, "serve is told the state paths install used, whatever the service's environment")
 	assert.Equal(t, ""+
 		"  kept the admin password from PGPASSWORD in admin-password\n"+
 		"✔ pgswitch is running on 127.0.0.1:6432, forwarding to 127.0.0.1:5433\n", out)
