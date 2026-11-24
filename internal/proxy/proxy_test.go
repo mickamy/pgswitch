@@ -343,6 +343,19 @@ func TestProxyRejects(t *testing.T) {
 			send:     pgwire.Packet{Code: protocol30, Body: []byte("user")}.Bytes(),
 			wantCode: pgwire.CodeProtocolViolation,
 		},
+		"a declaration naming no container": {
+			upstream: upstream,
+			router:   fixedRouter("shop_development"),
+			send:     pgwire.RelayDeclaration("shop-db-1").Bytes(),
+			wantCode: pgwire.CodeProtocolViolation,
+		},
+		"a second declaration": {
+			upstream: upstream,
+			router:   fixedRouter("shop_development"),
+			send: append(pgwire.RelayDeclaration("4d51f0679caa").Bytes(),
+				pgwire.RelayDeclaration("89393190908c").Bytes()...),
+			wantCode: pgwire.CodeProtocolViolation,
+		},
 	}
 
 	for name, tt := range tests {
@@ -502,4 +515,55 @@ func TestConnsListsRelayedConnections(t *testing.T) {
 
 	require.NoError(t, conn.Close())
 	assert.Eventually(t, func() bool { return len(p.Conns()) == 0 }, 5*time.Second, 10*time.Millisecond)
+}
+
+func TestProxyPassesTheDeclaredContainerToTheRouter(t *testing.T) {
+	t.Parallel()
+
+	upstream, received := startUpstream(t)
+	declared := make(chan string, 2)
+	router := proxy.RouterFunc(func(ctx context.Context, _, _ net.Addr, database string) (proxy.Route, error) {
+		id, ok := proxy.Container(ctx)
+		if !ok {
+			id = "(none)"
+		}
+		declared <- id
+
+		return proxy.Route{Database: database}, nil
+	})
+	addr, _ := startProxy(t, upstream, router)
+
+	conn := dial(t, addr)
+	_, err := conn.Write(pgwire.RelayDeclaration("4d51f0679caa").Bytes())
+	require.NoError(t, err)
+	_, err = conn.Write(pgwire.Packet{Code: codeSSLRequest}.Bytes())
+	require.NoError(t, err)
+	reply := make([]byte, 1)
+	_, err = io.ReadFull(conn, reply)
+	require.NoError(t, err)
+	assert.Equal(t, byte('N'), reply[0], "SSL is declined after a declaration as before")
+	_, err = conn.Write(startupPacket(pgwire.Param{Name: "database", Value: "shop_development"}))
+	require.NoError(t, err)
+
+	assert.Equal(t, "4d51f0679caa", <-declared)
+	startup := receive(t, received)
+	assert.Equal(t, pgwire.KindStartup, startup.Kind(), "the declaration stops at the proxy")
+
+	_, err = dial(t, addr).Write(startupPacket(pgwire.Param{Name: "database", Value: "shop_development"}))
+	require.NoError(t, err)
+	assert.Equal(t, "(none)", <-declared, "a connection without one declares nothing")
+}
+
+func TestProxyForwardsACancelAfterADeclaration(t *testing.T) {
+	t.Parallel()
+
+	upstream, received := startUpstream(t)
+	addr, _ := startProxy(t, upstream, fixedRouter("unused"))
+
+	cancel := pgwire.Packet{Code: codeCancelRequest, Body: []byte{0, 0, 0, 42, 1, 2, 3, 4}}
+	conn := dial(t, addr)
+	_, err := conn.Write(append(pgwire.RelayDeclaration("4d51f0679caa").Bytes(), cancel.Bytes()...))
+	require.NoError(t, err)
+
+	assert.Equal(t, cancel, receive(t, received))
 }

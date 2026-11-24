@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -188,4 +189,27 @@ func TestStartupDatabase(t *testing.T) {
 			assert.Equal(t, tt.want, s.Database())
 		})
 	}
+}
+
+func TestRelayDeclaration(t *testing.T) {
+	t.Parallel()
+
+	pkt, err := pgwire.ReadPacket(bytes.NewReader(pgwire.RelayDeclaration("4d51f0679caa").Bytes()))
+	require.NoError(t, err)
+	assert.Equal(t, pgwire.KindRelayDeclaration, pkt.Kind())
+	id, err := pkt.ContainerID()
+	require.NoError(t, err)
+	assert.Equal(t, "4d51f0679caa", id)
+
+	for name, body := range map[string]string{
+		"empty":     "",
+		"not hex":   "shop-db-1",
+		"uppercase": "4D51F0679CAA",
+		"too long":  strings.Repeat("a", 65),
+	} {
+		_, err := pgwire.Packet{Code: pgwire.RelayDeclaration("").Code, Body: []byte(body)}.ContainerID()
+		require.ErrorContains(t, err, "invalid container ID", name)
+	}
+	_, err = pgwire.Packet{Code: 80877103}.ContainerID()
+	assert.ErrorContains(t, err, "not a relay declaration", "an SSLRequest")
 }

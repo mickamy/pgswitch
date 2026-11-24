@@ -6,16 +6,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 )
 
 const (
-	codeCancelRequest   = 80877102
-	codeSSLRequest      = 80877103
-	codeGSSENCRequest   = 80877104
-	protocolMajorV3     = 3
-	headerLen           = 8
-	maxStartupPacketLen = 10000 // MAX_STARTUP_PACKET_LENGTH in Postgres
-	tlsHandshakeRecord  = 0x16
+	codeCancelRequest = 80877102
+	codeSSLRequest    = 80877103
+	codeGSSENCRequest = 80877104
+	// codeRelayDeclaration is pgswitch's own, 1234.0x7067 ("pg") in the
+	// numbering Postgres uses for the codes above.
+	codeRelayDeclaration = 1234<<16 | 0x7067
+	maxContainerIDLen    = 64
+	protocolMajorV3      = 3
+	headerLen            = 8
+	maxStartupPacketLen  = 10000 // MAX_STARTUP_PACKET_LENGTH in Postgres
+	tlsHandshakeRecord   = 0x16
 )
 
 // NegotiationDenied is the reply that declines SSL and GSS encryption.
@@ -36,6 +41,9 @@ const (
 	KindSSLRequest
 	KindGSSENCRequest
 	KindCancelRequest
+	// KindRelayDeclaration is what pgswitch relay sends first: the container
+	// its client runs in.
+	KindRelayDeclaration
 )
 
 func (k Kind) String() string {
@@ -48,6 +56,8 @@ func (k Kind) String() string {
 		return "GSSENCRequest"
 	case KindCancelRequest:
 		return "CancelRequest"
+	case KindRelayDeclaration:
+		return "RelayDeclaration"
 	case KindUnknown:
 	}
 
@@ -96,12 +106,33 @@ func (p Packet) Kind() Kind {
 		return KindGSSENCRequest
 	case codeCancelRequest:
 		return KindCancelRequest
+	case codeRelayDeclaration:
+		return KindRelayDeclaration
 	}
 	if p.Code>>16 == protocolMajorV3 {
 		return KindStartup
 	}
 
 	return KindUnknown
+}
+
+// RelayDeclaration declares that the connection comes from the container id.
+func RelayDeclaration(id string) Packet {
+	return Packet{Code: codeRelayDeclaration, Body: []byte(id)}
+}
+
+// ContainerID returns the container a relay declaration names: up to 64 hex
+// digits, as Docker writes IDs.
+func (p Packet) ContainerID() (string, error) {
+	if p.Kind() != KindRelayDeclaration {
+		return "", fmt.Errorf("pgwire: not a relay declaration: %s", p.Kind())
+	}
+	id := string(p.Body)
+	if id == "" || len(id) > maxContainerIDLen || strings.Trim(id, "0123456789abcdef") != "" {
+		return "", fmt.Errorf("pgwire: invalid container ID %q", id)
+	}
+
+	return id, nil
 }
 
 func (p Packet) Bytes() []byte {
