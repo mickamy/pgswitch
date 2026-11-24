@@ -218,6 +218,19 @@ func (w Worktree) DefaultBranch() (string, error) {
 	return fallbackBranch, nil
 }
 
+// HasBranch reports whether the repository has branch.
+func (w Worktree) HasBranch(branch string) (bool, error) {
+	if err := w.checkRefFormat(); err != nil {
+		return false, err
+	}
+	exists, err := ref.Exists(w.CommonDir, ref.Heads(branch))
+	if err != nil {
+		return false, fmt.Errorf("git: %w", err)
+	}
+
+	return exists, nil
+}
+
 func (w Worktree) checkRefFormat() error {
 	_, err := os.Stat(filepath.Join(w.CommonDir, "reftable"))
 	if err == nil {

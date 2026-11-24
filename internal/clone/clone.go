@@ -27,7 +27,7 @@ var (
 // Label says which repository, branch and requested database a branch
 // database belongs to, so it can be found again once the branch is gone.
 type Label struct {
-	// Repo is the repository's common git directory.
+	// Repo is the repository's ID (git.RepoID), the one its name is made from.
 	Repo     string
 	Branch   string
 	Database string
