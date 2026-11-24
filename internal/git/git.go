@@ -79,12 +79,20 @@ func open(root string) (Worktree, error) {
 	if err != nil {
 		return Worktree{}, err
 	}
-	// It names branch databases, so every worktree must spell it alike.
-	if commonDir, err = filepath.EvalSymlinks(commonDir); err != nil {
-		return Worktree{}, fmt.Errorf("git: %w", err)
-	}
 
 	return Worktree{Root: root, GitDir: gitDir, CommonDir: commonDir}, nil
+}
+
+// RepoID names the repository at commonDir alike from every worktree, though
+// they may reach it through different paths. Unlike commonDir, it need not end
+// in .git when the main worktree has one.
+func RepoID(commonDir string) (string, error) {
+	id, err := filepath.EvalSymlinks(commonDir)
+	if err != nil {
+		return "", fmt.Errorf("git: %w", err)
+	}
+
+	return id, nil
 }
 
 // Worktrees lists the checkouts of the repository at commonDir: the main one,

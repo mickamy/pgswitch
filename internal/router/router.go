@@ -188,15 +188,21 @@ func (r Router) resolve(ctx context.Context, client, server net.Addr, database s
 
 		return attribution{route: rt}
 	}
+	repoID, err := git.RepoID(wt.CommonDir)
+	if err != nil {
+		logger.Warn("unattributed connection", "worktree", wt.Root, "err", err)
 
-	rt.Database = route.PhysicalName(wt.CommonDir, database, branch, defaultBranch)
+		return attribution{route: rt}
+	}
+
+	rt.Database = route.PhysicalName(repoID, database, branch, defaultBranch)
 	var sources []string
 	var renamedFrom string
 	if rt.Database != database {
-		renamedFrom = r.recentlyRenamedFrom(wt.CommonDir, database, branch, defaultBranch)
+		renamedFrom = r.recentlyRenamedFrom(wt.CommonDir, repoID, database, branch, defaultBranch)
 		parents := r.parentBranches(wt, branch, defaultBranch)
 		for _, p := range parents {
-			sources = append(sources, route.PhysicalName(wt.CommonDir, database, p, defaultBranch))
+			sources = append(sources, route.PhysicalName(repoID, database, p, defaultBranch))
 		}
 		if !slices.Contains(sources, database) {
 			sources = append(sources, database)
@@ -231,10 +237,16 @@ func (r Router) followRename(ctx context.Context, commonDir, from, to string) {
 
 		return
 	}
+	repoID, err := git.RepoID(commonDir)
+	if err != nil {
+		logger.Warn("follow branch rename", "err", err)
+
+		return
+	}
 
 	for _, db := range r.databases.of(commonDir) {
-		oldName := route.PhysicalName(commonDir, db, from, defaultBranch)
-		newName := route.PhysicalName(commonDir, db, to, defaultBranch)
+		oldName := route.PhysicalName(repoID, db, from, defaultBranch)
+		newName := route.PhysicalName(repoID, db, to, defaultBranch)
 		label := clone.Label{Repo: commonDir, Branch: to, Database: db}
 		if err := r.cloner.Rename(ctx, oldName, newName, label); err != nil {
 			logger.Warn("follow branch rename", "database", db, "err", err)
@@ -245,13 +257,13 @@ func (r Router) followRename(ctx context.Context, commonDir, from, to string) {
 // recentlyRenamedFrom returns the database branch's database had before a
 // rename of branch just now, or "" when there was none or it involved the
 // default branch.
-func (r Router) recentlyRenamedFrom(commonDir, database, branch, defaultBranch string) string {
+func (r Router) recentlyRenamedFrom(commonDir, repoID, database, branch, defaultBranch string) string {
 	rename, ok, err := ref.RenamedFrom(commonDir, branch)
 	if err != nil || !ok || time.Since(rename.At) > recentWindow || rename.From == defaultBranch {
 		return ""
 	}
 
-	return route.PhysicalName(commonDir, database, rename.From, defaultBranch)
+	return route.PhysicalName(repoID, database, rename.From, defaultBranch)
 }
 
 // repoName names a repository by its main worktree's directory, or by its git

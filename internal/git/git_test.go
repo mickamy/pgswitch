@@ -81,7 +81,7 @@ func TestFindLinkedWorktree(t *testing.T) {
 	assert.Equal(t, "fix-tax", branch)
 }
 
-func TestFindLinkedWorktreeThroughASymlink(t *testing.T) {
+func TestRepoID(t *testing.T) {
 	t.Parallel()
 
 	repo := newRepo(t, "main")
@@ -93,10 +93,40 @@ func TestFindLinkedWorktreeThroughASymlink(t *testing.T) {
 	gitDir := filepath.Join(alias, ".git", "worktrees", filepath.Base(linked))
 	require.NoError(t, os.WriteFile(filepath.Join(linked, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o600))
 
-	wt, err := git.Find(linked)
+	main, err := git.Find(repo)
+	require.NoError(t, err)
+	viaAlias, err := git.Find(linked)
+	require.NoError(t, err)
+	require.NotEqual(t, main.CommonDir, viaAlias.CommonDir)
+
+	mainID, err := git.RepoID(main.CommonDir)
+	require.NoError(t, err)
+	aliasID, err := git.RepoID(viaAlias.CommonDir)
 	require.NoError(t, err)
 
-	assert.Equal(t, filepath.Join(repo, ".git"), wt.CommonDir)
+	assert.Equal(t, mainID, aliasID)
+}
+
+// TestSymlinkedGitDir moves the main worktree's .git elsewhere and leaves a
+// symlink, which git accepts.
+func TestSymlinkedGitDir(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t, "main")
+	metadata := filepath.Join(filepath.Dir(repo), filepath.Base(repo)+"-metadata")
+	require.NoError(t, os.Rename(filepath.Join(repo, ".git"), metadata))
+	t.Cleanup(func() { _ = os.RemoveAll(metadata) })
+	require.NoError(t, os.Symlink(metadata, filepath.Join(repo, ".git")))
+
+	wt, err := git.Find(repo)
+	require.NoError(t, err)
+
+	wts, err := git.Worktrees(wt.CommonDir)
+	require.NoError(t, err)
+	assert.Equal(t, []git.Worktree{wt}, wts, "the main worktree is still listed")
+	id, err := git.RepoID(wt.CommonDir)
+	require.NoError(t, err)
+	assert.Equal(t, metadata, id)
 }
 
 func TestFindOutsideRepository(t *testing.T) {
