@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -99,6 +100,39 @@ func (c Client) Inspect(ctx context.Context, id string) (Container, error) {
 		Labels:  inspected.Config.Labels,
 		Env:     inspected.Config.Env,
 	}, nil
+}
+
+// BridgeGateways returns the gateway addresses of the default bridge network,
+// which host-gateway in extra_hosts resolves to.
+func (c Client) BridgeGateways(ctx context.Context) ([]netip.Addr, error) {
+	var bridge struct {
+		IPAM struct {
+			Config []struct {
+				Gateway string
+			}
+		}
+	}
+	if err := c.get(ctx, "/networks/bridge", &bridge); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, errors.New("docker: no bridge network")
+		}
+
+		return nil, err
+	}
+
+	var gateways []netip.Addr
+	for _, conf := range bridge.IPAM.Config {
+		if conf.Gateway == "" {
+			continue
+		}
+		addr, err := netip.ParseAddr(conf.Gateway)
+		if err != nil {
+			return nil, fmt.Errorf("docker: bridge gateway: %w", err)
+		}
+		gateways = append(gateways, addr)
+	}
+
+	return gateways, nil
 }
 
 func (c Client) get(ctx context.Context, path string, out any) error {

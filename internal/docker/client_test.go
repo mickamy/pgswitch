@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -88,6 +89,51 @@ func TestInspect(t *testing.T) { //nolint:paralleltest // t.Chdir changes the pr
 
 	_, err = client.Inspect(t.Context(), "gone")
 	assert.ErrorIs(t, err, docker.ErrNotFound)
+}
+
+func TestBridgeGateways(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
+	tests := []struct {
+		name string
+		body string
+		want []netip.Addr
+	}{
+		{
+			name: "IPv4",
+			body: `{"Name":"bridge","IPAM":{"Driver":"default","Config":[{"Subnet":"172.17.0.0/16","Gateway":"172.17.0.1"}]}}`,
+			want: []netip.Addr{netip.MustParseAddr("172.17.0.1")},
+		},
+		{
+			name: "dual stack",
+			body: `{"IPAM":{"Config":[{"Subnet":"172.17.0.0/16","Gateway":"172.17.0.1"},
+			                          {"Subnet":"fd00::/64","Gateway":"fd00::1"}]}}`,
+			want: []netip.Addr{netip.MustParseAddr("172.17.0.1"), netip.MustParseAddr("fd00::1")},
+		},
+		{
+			name: "no gateway",
+			body: `{"IPAM":{"Config":[{"Subnet":"172.17.0.0/16"}]}}`,
+			want: nil,
+		},
+	}
+	for _, tt := range tests { //nolint:paralleltest // t.Chdir changes the process cwd
+		t.Run(tt.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			serveAPI(t, map[string]string{"/networks/bridge": tt.body})
+
+			got, err := docker.NewClient(socket).BridgeGateways(t.Context())
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestBridgeGatewaysWithoutABridge(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
+	t.Chdir(t.TempDir())
+	serveAPI(t, map[string]string{})
+
+	_, err := docker.NewClient(socket).BridgeGateways(t.Context())
+
+	require.EqualError(t, err, "docker: no bridge network")
 }
 
 func TestClientWithoutDocker(t *testing.T) { //nolint:paralleltest // t.Chdir changes the process cwd
