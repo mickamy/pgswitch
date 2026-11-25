@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/mickamy/pgswitch/internal/control"
@@ -78,7 +79,8 @@ func runService(ctx context.Context, args []string, std IO) int {
 
 func runServiceInstall(ctx context.Context, args []string, std IO) int {
 	fs := newFlagSet("service install", std.Err, printServiceUsage)
-	listen := fs.String("listen", defaultListen, "address to accept clients on")
+	var listen addrList
+	fs.Var(&listen, "listen", "address to accept clients on; repeatable")
 	upstreamAddr := fs.String("upstream", defaultUpstream, "address of the default Postgres server")
 	adminUser := fs.String("admin-user", currentUser(), "role that creates branch databases there")
 	debug := fs.Bool("debug", false, "log how each connection is attributed")
@@ -125,10 +127,13 @@ func runServiceInstall(ctx context.Context, args []string, std IO) int {
 		fmt.Fprintf(std.Out, "  kept the admin password from PGPASSWORD in %s\n", passwordFile)
 	}
 
-	serveArgs := []string{
-		"serve", "-listen", *listen, "-upstream", *upstreamAddr, "-admin-user", *adminUser,
-		"-control", socket, "-password-file", passwordFile,
+	// Without -listen, serve picks its addresses itself each time it starts.
+	serveArgs := []string{"serve"}
+	for _, addr := range listen {
+		serveArgs = append(serveArgs, "-listen", addr)
 	}
+	serveArgs = append(serveArgs,
+		"-upstream", *upstreamAddr, "-admin-user", *adminUser, "-control", socket, "-password-file", passwordFile)
 	if *debug {
 		serveArgs = append(serveArgs, "-debug")
 	}
@@ -139,7 +144,11 @@ func runServiceInstall(ctx context.Context, args []string, std IO) int {
 	if err := waitForServe(ctx, socket); err != nil {
 		return fail(std, fmt.Errorf("%w; %s", err, whereLogsAre(logFile)))
 	}
-	fmt.Fprintf(std.Out, "✔ pgswitch is running on %s, forwarding to %s\n", *listen, *upstreamAddr)
+	listening := defaultListen
+	if len(listen) > 0 {
+		listening = strings.Join(listen, ", ")
+	}
+	fmt.Fprintf(std.Out, "✔ pgswitch is running on %s, forwarding to %s\n", listening, *upstreamAddr)
 
 	return exit.OK
 }
@@ -214,7 +223,9 @@ func printServiceUsage(w io.Writer) {
 	fmt.Fprint(w, "Installing again rewrites and restarts it. PGPASSWORD, when set, is kept in a\n")
 	fmt.Fprint(w, "file only you can read, in the state directory.\n\n")
 	fmt.Fprint(w, "Flags for install:\n")
-	fmt.Fprintf(w, "  -listen ADDR      address to accept clients on (default %q)\n", defaultListen)
+	fmt.Fprint(w, "  -listen ADDR      address to accept clients on; repeatable\n")
+	fmt.Fprintf(w, "                    (default %q, and the Docker bridge gateway when it is on this host)\n",
+		defaultListen)
 	fmt.Fprintf(w, "  -upstream ADDR    address of the default Postgres server (default %q)\n", defaultUpstream)
 	fmt.Fprint(w, "  -admin-user NAME  role that creates branch databases there (default: the OS user)\n")
 	fmt.Fprint(w, "  -debug            log how each connection is attributed\n")
