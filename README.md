@@ -3,7 +3,9 @@
 Per-branch Postgres databases behind one DATABASE_URL, following git switch and every worktree.
 
 [![CI](https://github.com/mickamy/pgswitch/actions/workflows/ci.yaml/badge.svg)](https://github.com/mickamy/pgswitch/actions/workflows/ci.yaml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/mickamy/pgswitch)](https://github.com/mickamy/pgswitch/releases/latest)
+[![Sponsor](https://img.shields.io/github/sponsors/mickamy?label=Sponsor&logo=GitHub)](https://github.com/sponsors/mickamy)
 
 ## Installation
 
