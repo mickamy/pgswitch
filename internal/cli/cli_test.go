@@ -166,6 +166,34 @@ func TestServeHidesDebugByDefault(t *testing.T) {
 	assert.NotContains(t, stderr.String(), "level=DEBUG")
 }
 
+func TestServeListensOnEveryListenAddress(t *testing.T) {
+	t.Parallel()
+
+	other := freeAddr(t)
+	addr, stderr, stop := startServe(t, "-listen", other, "-debug")
+	closeBeforeStartup(t, addr)
+	closeBeforeStartup(t, other)
+
+	assert.Eventually(t, func() bool { return strings.Count(stderr.String(), "closed before startup") == 2 },
+		5*time.Second, 10*time.Millisecond)
+	assert.Equal(t, exit.OK, stop())
+}
+
+func TestServeFailsWhenAListenAddressIsTaken(t *testing.T) {
+	t.Parallel()
+
+	var lc net.ListenConfig
+	taken, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = taken.Close() })
+
+	code, _, stderr := runCLI(t, "serve", "-listen", freeAddr(t), "-listen", taken.Addr().String(),
+		"-control", "", "-password-file", "")
+
+	assert.Equal(t, exit.Error, code)
+	assert.Contains(t, stderr, taken.Addr().String())
+}
+
 func closeBeforeStartup(t *testing.T, addr string) {
 	t.Helper()
 

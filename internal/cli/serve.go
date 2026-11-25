@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/mickamy/pgswitch/internal/docker"
 	"github.com/mickamy/pgswitch/internal/events"
 	"github.com/mickamy/pgswitch/internal/exit"
+	"github.com/mickamy/pgswitch/internal/listen"
 	"github.com/mickamy/pgswitch/internal/pgadmin"
 	"github.com/mickamy/pgswitch/internal/proxy"
 	"github.com/mickamy/pgswitch/internal/prune"
@@ -32,7 +34,8 @@ const (
 
 func runServe(ctx context.Context, args []string, std IO) int {
 	fs := newFlagSet("serve", std.Err, printServeUsage)
-	listen := fs.String("listen", defaultListen, "address to accept clients on")
+	var explicit addrList
+	fs.Var(&explicit, "listen", "address to accept clients on; repeatable")
 	upstreamAddr := fs.String("upstream", defaultUpstream, "address of the Postgres server")
 	adminUser := fs.String("admin-user", currentUser(), "role that creates branch databases; password from PGPASSWORD")
 	passwordFile := fs.String("password-file", defaultPasswordFile(), "admin password when PGPASSWORD is unset")
@@ -58,11 +61,20 @@ func runServe(ctx context.Context, args []string, std IO) int {
 		events.NewHandler(recent),
 	))
 
-	var lc net.ListenConfig
-	ln, err := lc.Listen(ctx, "tcp", *listen)
+	dockerAPI, hasDocker := dockerClient(logger)
+	var gateways, local []netip.Addr
+	if len(explicit) == 0 && hasDocker {
+		gateways, local = bridgeOnHost(ctx, dockerAPI, logger)
+	}
+	addrs, err := listen.Addresses(explicit, defaultListen, gateways, local)
 	if err != nil {
 		return fail(std, err)
 	}
+	lns, err := listen.Open(ctx, addrs, logger)
+	if err != nil {
+		return fail(std, err)
+	}
+	defer closeAll(lns)
 
 	password := os.Getenv("PGPASSWORD")
 	if password == "" {
@@ -90,8 +102,12 @@ func runServe(ctx context.Context, args []string, std IO) int {
 		p.Sever(c.Worktree, c.To)
 	})
 	servers.Get(byDefault) // known to prune from the start
+	var finder router.Docker
+	if hasDocker {
+		finder = dockerAPI
+	}
 	r = router.New(logger, byDefault, func(u upstream.Upstream) router.Cloner { return servers.Get(u).cloner },
-		dockerFinder(logger), w)
+		finder, w)
 	p = proxy.New(*upstreamAddr, r, logger)
 	go w.Run(ctx)
 
@@ -117,8 +133,12 @@ func runServe(ctx context.Context, args []string, std IO) int {
 		defer stopped()
 	}
 
-	logger.Info("serving", "listen", ln.Addr().String(), "upstream", *upstreamAddr, "admin_user", *adminUser)
-	if err := p.Serve(ctx, ln); err != nil {
+	listening := make([]string, len(lns))
+	for i, ln := range lns {
+		listening[i] = ln.Addr().String()
+	}
+	logger.Info("serving", "listen", listening, "upstream", *upstreamAddr, "admin_user", *adminUser)
+	if err := serveAll(ctx, p, lns); err != nil {
 		return fail(std, err)
 	}
 
@@ -129,7 +149,9 @@ func printServeUsage(w io.Writer) {
 	fmt.Fprintf(w, "Usage: %s serve [flags]\n\n", Name)
 	fmt.Fprint(w, "Run the proxy in the foreground until interrupted.\n\n")
 	fmt.Fprint(w, "Flags:\n")
-	fmt.Fprintf(w, "  -listen ADDR         address to accept clients on (default %q)\n", defaultListen)
+	fmt.Fprint(w, "  -listen ADDR         address to accept clients on; repeatable\n")
+	fmt.Fprintf(w, "                       (default %q, and the Docker bridge gateway when it is on this host)\n",
+		defaultListen)
 	fmt.Fprintf(w, "  -upstream ADDR       address of the Postgres server (default %q)\n", defaultUpstream)
 	fmt.Fprint(w, "  -admin-user NAME     role that creates branch databases (default: the OS user)\n")
 	fmt.Fprint(w, "                       its password is read from PGPASSWORD, else from -password-file\n")
@@ -179,18 +201,67 @@ func serveControl(ctx context.Context, path string, src control.Source, logger *
 	return func() { <-done }, nil
 }
 
-// dockerFinder finds repositories' Postgres through Docker, or is nil when
-// there is no Docker to ask.
-func dockerFinder(logger *slog.Logger) router.Docker {
+// dockerClient returns a client for the Docker API, unless there is no
+// Docker to ask.
+func dockerClient(logger *slog.Logger) (docker.Client, bool) {
 	home, _ := os.UserHomeDir()
 	socket, err := docker.Socket(docker.Env{Home: home, Getenv: os.Getenv})
 	if err != nil {
-		logger.Debug("not looking for Postgres in Docker", "err", err)
+		logger.Debug("not using Docker", "err", err)
 
-		return nil
+		return docker.Client{}, false
 	}
 
-	return docker.NewClient(socket)
+	return docker.NewClient(socket), true
+}
+
+// bridgeOnHost returns the Docker bridge's gateways and the host's addresses,
+// so that serve also listens where host-gateway leads on native Docker on
+// Linux. Both are empty when either cannot be read.
+func bridgeOnHost(ctx context.Context, api docker.Client, logger *slog.Logger) (gateways, local []netip.Addr) {
+	gateways, err := api.BridgeGateways(ctx)
+	if err != nil {
+		logger.Debug("not listening on the Docker bridge", "err", err)
+
+		return nil, nil
+	}
+	local, err = listen.LocalAddrs()
+	if err != nil {
+		logger.Warn("not listening on the Docker bridge", "err", err)
+
+		return nil, nil
+	}
+
+	return gateways, local
+}
+
+// serveAll runs p on every listener until ctx ends or one of them fails.
+func serveAll(ctx context.Context, p proxy.Proxy, lns []net.Listener) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errs := make(chan error, len(lns))
+	for _, ln := range lns {
+		go func() {
+			err := p.Serve(ctx, ln)
+			cancel()
+			errs <- err
+		}()
+	}
+	var first error
+	for range lns {
+		if err := <-errs; err != nil && first == nil {
+			first = err
+		}
+	}
+
+	return first
+}
+
+func closeAll(lns []net.Listener) {
+	for _, ln := range lns {
+		_ = ln.Close()
+	}
 }
 
 // server is what pgswitch keeps per upstream: one cloner, so clones and drops

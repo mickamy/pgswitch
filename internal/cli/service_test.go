@@ -64,11 +64,12 @@ func TestServiceInstall(t *testing.T) {
 	assert.Equal(t, []service.Spec{{
 		Binary: binary,
 		Args: []string{
-			"serve", "-listen", "127.0.0.1:6432", "-upstream", "127.0.0.1:5433", "-admin-user", "postgres",
+			"serve", "-upstream", "127.0.0.1:5433", "-admin-user", "postgres",
 			"-control", "pgswitch.sock", "-password-file", "admin-password", "-debug",
 		},
 		LogPath: "pgswitch.log",
-	}}, m.installed, "serve is told the state paths install used, whatever the service's environment")
+	}}, m.installed, "serve is told the state paths install used, whatever the service's environment, "+
+		"and picks its own addresses")
 	assert.Equal(t, ""+
 		"  kept the admin password from PGPASSWORD in admin-password\n"+
 		"✔ pgswitch is running on 127.0.0.1:6432, forwarding to 127.0.0.1:5433\n", out)
@@ -76,6 +77,25 @@ func TestServiceInstall(t *testing.T) {
 	password, err := cli.ReadPassword("admin-password")
 	require.NoError(t, err)
 	assert.Equal(t, "postgres", password)
+}
+
+func TestServiceInstallWithListen(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("PGPASSWORD", "")
+	m := &fakeManager{t: t, starts: true}
+	cli.StubServices(t, m, binary, ".", 5*time.Second)
+
+	code, out, stderr := runCLI(t, "service", "install",
+		"-listen", "127.0.0.1:7000", "-listen", "172.17.0.1:7000", "-admin-user", "postgres")
+
+	require.Equal(t, exit.OK, code, stderr)
+	require.Len(t, m.installed, 1)
+	assert.Equal(t, []string{
+		"serve", "-listen", "127.0.0.1:7000", "-listen", "172.17.0.1:7000",
+		"-upstream", "127.0.0.1:5432", "-admin-user", "postgres",
+		"-control", "pgswitch.sock", "-password-file", "admin-password",
+	}, m.installed[0].Args)
+	assert.Equal(t, "✔ pgswitch is running on 127.0.0.1:7000, 172.17.0.1:7000, forwarding to 127.0.0.1:5432\n", out)
 }
 
 func TestServiceInstallWithoutPGPASSWORD(t *testing.T) {

@@ -70,12 +70,16 @@ services:
   pgswitch:
     image: ghcr.io/mickamy/pgswitch
     command: relay
+    extra_hosts:
+      - host.docker.internal:host-gateway
   web:
     environment:
       DATABASE_URL: postgres://pgswitch:5432/myapp_development
 ```
 
-The relay forwards to serve at `host.docker.internal:6432` and tells it which container the connection comes from, so it is routed by the worktree Compose ran in. This works where `host.docker.internal` reaches the host's loopback: Docker Desktop, OrbStack and Colima.
+The relay forwards to serve at `host.docker.internal:6432` and tells it which container the connection comes from, so it is routed by the worktree Compose ran in. `extra_hosts` maps `host.docker.internal` to `host-gateway`, which Docker Desktop and OrbStack resolve to the host and native Docker on Linux to the Docker bridge's gateway (`172.17.0.1` by default), so one `compose.yaml` works on both.
+
+On native Docker on Linux, serve therefore also listens on the bridge gateway, at the same port, unless `-listen` is given. A firewall such as ufw may block connections from containers to the host; allow them on `docker0`. The bridge address can also be reached from other machines on the network that route to it. A service installed with v0.0.1 listens on `127.0.0.1:6432` only until `service install` is run again.
 
 ### Commands
 
