@@ -191,7 +191,7 @@ func TestServeFailsWhenAListenAddressIsTaken(t *testing.T) {
 		"-control", "", "-password-file", "")
 
 	assert.Equal(t, exit.Error, code)
-	assert.Contains(t, stderr, "address already in use")
+	assert.Contains(t, stderr, taken.Addr().String())
 }
 
 func closeBeforeStartup(t *testing.T, addr string) {
