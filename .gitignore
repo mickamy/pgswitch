@@ -23,6 +23,7 @@
 
 # artifacts
 bin/
+dist/
 
 # temporary files
 tmp/

@@ -18,6 +18,7 @@ var (
 
 type fakeContainer struct {
 	id, workingDir, hostIP string
+	relay                  bool
 	privatePort            int
 	publicPort             int
 	env                    []string
@@ -33,6 +34,9 @@ func routes(t *testing.T, containers ...fakeContainer) map[string]string {
 		labels := map[string]string{}
 		if c.workingDir != "" {
 			labels["com.docker.compose.project.working_dir"] = c.workingDir
+		}
+		if c.relay {
+			labels[docker.RelayLabel] = "true"
 		}
 		list = append(list, map[string]any{
 			"Id": c.id, "State": "running", "Labels": labels,
@@ -112,6 +116,18 @@ func TestFindPostgres(t *testing.T) { //nolint:paralleltest // t.Chdir changes t
 		},
 		"not Postgres": {
 			containers: []fakeContainer{with(func(c *fakeContainer) { c.privatePort = 6379 })},
+		},
+		"a relay published on the host": {
+			containers: []fakeContainer{with(func(c *fakeContainer) { c.relay = true })},
+		},
+		"a relay beside the Postgres": {
+			containers: []fakeContainer{db, with(func(c *fakeContainer) {
+				c.id, c.publicPort, c.relay = "99f8eb347a74", 15432, true
+			})},
+			want: docker.Postgres{
+				ContainerID: "4d51f0679caa", Addr: "127.0.0.1:5433", User: "shop", Password: "secret",
+			},
+			wantOK: true,
 		},
 		"two": {
 			containers: []fakeContainer{db, with(func(c *fakeContainer) { c.id = "89393190908c"; c.publicPort = 5434 })},

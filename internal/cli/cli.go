@@ -52,6 +52,12 @@ var commands = []command{
 		usage:   printServiceUsage,
 	},
 	{
+		name:    "relay",
+		summary: "Relay a container's connections to serve on the host",
+		run:     runRelay,
+		usage:   printRelayUsage,
+	},
+	{
 		name:    "prune",
 		summary: "Drop databases whose branch or repository is gone",
 		run:     runPrune,

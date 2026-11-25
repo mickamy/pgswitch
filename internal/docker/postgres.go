@@ -13,6 +13,10 @@ import (
 // WorkingDirLabel is where Compose records the directory it ran in.
 const WorkingDirLabel = "com.docker.compose.project.working_dir"
 
+// RelayLabel marks pgswitch relay's image. A relay listens on the Postgres
+// port, and taking it for Postgres would loop serve back to itself.
+const RelayLabel = "io.github.mickamy.pgswitch.relay"
+
 const (
 	postgresPort = 5432
 	defaultUser  = "postgres"
@@ -40,7 +44,7 @@ func (c Client) FindPostgres(ctx context.Context, roots []string) (pg Postgres, 
 
 	var found []Postgres
 	for _, ct := range containers {
-		if !ct.Running || !insideAny(ct.Labels[WorkingDirLabel], roots) {
+		if !ct.Running || ct.Labels[RelayLabel] != "" || !insideAny(ct.Labels[WorkingDirLabel], roots) {
 			continue
 		}
 		addr, published := publishedPostgres(ct.Ports)
