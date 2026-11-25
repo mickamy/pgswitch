@@ -67,6 +67,37 @@ jobs:
           PGSWITCH_E2E_ADDR: 127.0.0.1:5432
           PGSWITCH_E2E_PASSWORD: postgres
 
+  # The runner's Docker is native, so the relay reaches serve on the bridge
+  # gateway rather than on loopback.
+  relay-e2e:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7.1.0
+        with:
+          go-version-file: go.mod
+
+      - run: go test -race -tags e2e -run TestRelay -v ./e2e/
+        env:
+          PGSWITCH_E2E_ADDR: 127.0.0.1:5432
+          PGSWITCH_E2E_PASSWORD: postgres
+          PGSWITCH_E2E_RELAY: "1"
+
   lint:
     runs-on: ubuntu-latest
     strategy:
