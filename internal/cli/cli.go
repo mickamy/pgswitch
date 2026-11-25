@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/mickamy/pgswitch/internal/exit"
@@ -141,6 +142,17 @@ func newFlagSet(name string, w io.Writer, usage func(io.Writer)) *flag.FlagSet {
 	fs.Usage = func() { usage(w) }
 
 	return fs
+}
+
+// addrList is a flag that may be given more than once.
+type addrList []string
+
+func (l *addrList) String() string { return strings.Join(*l, ",") }
+
+func (l *addrList) Set(s string) error {
+	*l = append(*l, s)
+
+	return nil
 }
 
 func fail(std IO, err error) int {
